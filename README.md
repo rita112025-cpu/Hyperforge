@@ -108,7 +108,8 @@ flowchart TD
 - 重新整理後無法區分「先前是失敗 / 取消 / 模型不可用」，一律顯示「尚未建立」。
 - 已結束的 job（cancelled / partial）本身的狀態不會因為之後 retry 成功而改變（那是歷史事實）；卡片與文件清單上的「語意索引」欄顯示的是**文件目前的狀態**。
 - `done` 不代表 RECOMBINE / EVOLVE / MANIFEST 已完成（它們尚未接入，只在各列標示）。
-- 瀏覽器驗收的「向量化成功」使用**合成 ONNX 模型**（`scripts/e2e/synthetic-model.cjs`，沒有語意）走真的 `TransformersEmbedder` + onnxruntime-web；**真模型的端到端向量化仍未驗證**（此環境無法下載）。
+- 取消與向量寫入之間有一個極小的時間窗：`ingest` 在開 transaction 寫入向量之前會再檢查一次取消；若取消剛好發生在那次檢查**之後**、transaction 完成**之前**，job 會顯示 `cancelled`、文件顯示「已取消索引」，但向量其實已經寫入；重新整理後該文件會顯示「已完成」。文字與資料仍然一致，只是取消時序（審查意見 [建議]）。
+- 瀏覽器驗收（作者自測，未經獨立執行）的「向量化成功」使用**合成 ONNX 模型**（`scripts/e2e/synthetic-model.cjs`，**沒有語意**，不是 MiniLM）走真的 `TransformersEmbedder` + onnxruntime-web：它只證明「管線有接通、寫入與取消行為正確」；**真模型的端到端向量化仍未驗證**（此環境無法下載）。
 
 ## 向量庫（第 2 輪）
 
