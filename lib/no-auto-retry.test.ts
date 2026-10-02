@@ -1,4 +1,5 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -99,7 +100,9 @@ describe("檢查器自己的單元測試（注入的壞原始碼必須被抓到�
 });
 
 // ───────────── 對實際原始碼套用 ─────────────
-const ROOT = new URL("../", import.meta.url).pathname;
+// Windows：URL.pathname 會得到 "/D:/..."，必須用 fileURLToPath；比較相對路徑前統一成正斜線
+const ROOT = fileURLToPath(new URL("../", import.meta.url));
+const norm = (p: string) => p.split("\\").join("/");
 function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((f) => {
     const p = join(dir, f);
@@ -108,7 +111,7 @@ function sources(dir: string): string[] {
   });
 }
 const files = [...sources(join(ROOT, "lib")), ...sources(join(ROOT, "components")), ...sources(join(ROOT, "app"))];
-const rel = (f: string) => f.replace(ROOT, "");
+const rel = (f: string) => norm(f).replace(norm(ROOT), "");
 
 describe("沒有自動 / 背景重試（對實際原始碼的靜態守門）", () => {
   it("掃描到足夠多的原始檔（避免路徑錯誤造成空掃描），且包含 store 與兩個會呼叫 retry 的元件", () => {

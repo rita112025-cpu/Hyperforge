@@ -1,4 +1,5 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -34,7 +35,9 @@ function visibleText(html: string): string {
     .replace(/&amp;/g, "&");
 }
 
-const ROOT = new URL("../../", import.meta.url).pathname;
+// Windows：URL.pathname 會得到 "/D:/..."，必須用 fileURLToPath；比較相對路徑前統一成正斜線
+const ROOT = fileURLToPath(new URL("../../", import.meta.url));
+const norm = (p: string) => p.split("\\").join("/");
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir).flatMap((f) => {
     const p = join(dir, f);
@@ -113,6 +116,6 @@ describe("原始碼掃描：禁止會把字串當 HTML 解析的 API", () => {
 
   it("components / lib / app 的非測試原始碼不使用 innerHTML、dangerouslySetInnerHTML 等", () => {
     const hits = files.filter((f) => BANNED.test(readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/.*$/gm, "")));
-    expect(hits.map((f) => f.replace(ROOT, ""))).toEqual([]);
+    expect(hits.map((f) => norm(f).replace(norm(ROOT), ""))).toEqual([]);
   });
 });
