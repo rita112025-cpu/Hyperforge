@@ -120,6 +120,35 @@ flowchart TD
 - **真 embedder**：`lib/vector/transformers-embedder.ts`（`@xenova/transformers` v2 舊套件，預設為多語言 paraphrase-multilingual-MiniLM-L12-v2 量化版，dim 384；詳見下方「Embedding 模型須知」）。僅限瀏覽器；模型與 wasm 自託管於 `public/models`、`public/ort`，`allowRemoteModels=false`，不連外。`next.config.mjs` 把 `sharp`、`onnxruntime-node` alias 為 false。模型檔不存在時 `isAvailable()` 為 false，管線降級為 PARTIAL（不用假向量）。`lib/vector/runtime.ts` 以單一 promise 初始化全域 VectorStore。`FakeEmbedder`（`fake-embedder.test-util.ts`）僅供測試，`lib/no-fake-in-product.test.ts` 會檢查非測試檔不得 import。
 - 內容雜湊用 `crypto.subtle`，只在 `localhost` 或 https 可用（用區網 IP 開 dev 會失敗）。
 
+## 一鍵七變（右側工廠；進行中，分三階段）
+
+針對**當前圖譜**產生 7 種輸出，皆可複製／下載。**沒有 AI**：全部是本地、決定性的「抽取＋模板」——內容來自原文句子（附文件名與位移），模板只負責排版，不憑空造事實；每個輸出都標示「抽取式（統計近似），非 AI」。
+
+| 階段 | 輸出 | 狀態 |
+| --- | --- | --- |
+| A | 核心摘要（3 行 + 10 點）、Notion 資料庫 JSON、共用 `digest` | 已實作 |
+| B | 心智圖（可互動樹）、簡報大綱（10 頁 + 講稿）、Threads 三風格 | 尚未實作（分頁顯示為停用） |
+| C | 反問提示（規則式，非論證；只對含強斷言線索的原文句子產生反問框架，找不到就少給或不給）、金句卡（1080×1080 PNG） | 尚未實作 |
+
+**「模板不得造事實」是可被機器檢查的**（`lib/outputs/segments.ts`）：每個輸出項目都先表示成片段——`quote`（原文切片，`text === rawText.slice(start,end)`）、`term`（圖譜概念名稱，必須出現在同一項目引用的原文中）、`ref`（文件名稱）、`frame`（模板框架，只允許固定白名單：標號、標點、標題、固定標籤，不得含對內容的判斷）。Markdown 與畫面都由同一份片段產生，測試（`verify.test.ts`）逐項檢查，並有負向測試證明檢查器真的會抓到違規。新增輸出若需要新的框架字串，必須加進白名單並通過審查。
+
+資料基礎與畫布相同：`OutputsPanel` 收到的是畫布當下的 `docs` 與 `graph`（同一次 render、`useMemo` 以它們為 key），語料變動即重算，不會顯示過期內容；面板固定顯示「基於 N 份文件、圖譜上顯示的 M 個概念」，概念被 150 上限截斷時另註明「共 X 個，其餘未納入」。輸出只使用圖譜上顯示的概念。結果與輸入文件順序無關（依文件 id 排序；測試涵蓋打亂順序）。
+
+- `lib/outputs/digest.ts`：重跑 `extractConcepts`（取完整 occurrence 與句子序號；圖譜的 evidence 只留 40 筆），以「句內不重複概念的 score 總和 / 長度正規化」排序句子（12–140 字元），去近似重複；`selectDiverse` 貪婪挑「涵蓋不同概念」的句子。暫存（煉成）節點不進輸出。
+- 資料不足時**照實少給並說明原因**（不湊數）：例如整段沒有標點、句子過長，會說明「有 N 個概念但找不到長度適中的原文句子」。
+- **Notion JSON** 形狀對齊 Notion API（Name/Type/Frequency/Documents/Source），但**未驗證能被 Notion 實際匯入**；`parent` 是占位符，需自行填入頁面 ID。已處理的限制（來源與查閱日期 2026-10-03）：
+  - [Request limits](https://developers.notion.com/reference/request-limits)：rich text 的 `text.content` ≤ 2000 字元（超過時**切成多段**，不截斷）；multi_select 一次 ≤ 100 個選項（超過時截為 100 並寫入 `warnings`）；單一請求 ≤ 1000 區塊與 500KB（資料庫定義超過時寫入 `warnings`）。
+  - [Property object](https://developers.notion.com/reference/property-object)：選項名稱「不分大小寫需唯一、不可含逗號」（逗號換成空白、大小寫不同者歸併到第一個寫法；文件名含逗號很常見）。
+  - 選項名稱 ≤ 100 字元：**文件沒有明說**，是我保守設定的上限（未驗證）。空名稱改為「(未命名)」。
+- **複製**用 `navigator.clipboard`（需 https 或 localhost、需使用者操作），失敗退到 `execCommand`，再失敗會顯示原因並建議改用「下載」。內建瀏覽器中程式碼觸發的複製會因「文件未取得焦點」失敗，真實點擊則成功（顯示「已複製」；剪貼簿內容無法回讀驗證）。
+- 使用者原文只以 React 文字節點顯示；匯出的是 UTF-8 純文字檔（Markdown / JSON），不是 HTML。
+- 限制：摘要品質受限於既有的句子切分與概念抽取（中文為統計近似）；`buildDigest` 在主執行緒同步執行，語料變動就重算（等於在 `buildGraph` 之外再多一次抽取）。Node 實測：0.29 MB 約 67 ms、1.17 MB 約 264 ms（`buildGraph` 同量約 94 / 342 ms，所以每次新增文件的主執行緒成本約為原本的 1.8 倍）；瀏覽器內未量測。小語料：1 萬字 `buildDigest` 約 4 ms、10 萬字約 24 ms（`buildGraph` 同量約 5 / 35 ms）。摘要與 Notion 的組裝本身 <1 ms。
+- **Markdown 匯出會跳脫使用者內容**（`lib/outputs/markdown.ts`）：匯出的 `.md` 會被帶到別的檢視器，原文與文件名是不可信內容。`quote` / `term` / `ref` 一律經 `escapeMarkdown`（反斜線跳脫 `` \ ` * _ [ ] ( ) < > ! # | ~ & @ { } ``、行首的 `-` `+` `>` `1.`、自動連結的 `scheme:` 與 `www.`），渲染後顯示結果仍等於原句；`frame` 是固定白名單，不跳脫。取捨：純文字檢視器會看到反斜線（安全優先）。測試涵蓋圖片、連結、HTML、標題、清單、引用、自動連結、email，並以固定 seed 的隨機字串驗證「跳脫再還原等於原文」。之後所有輸出的 `.md` 都必須走這個函式。
+- **效能原則**：資料基礎只讀圖譜統計（便宜）；較重的 `buildDigest` 只在面板展開且有概念時才算，摘要與 Notion 只算「目前被選取的分頁」；之後 B/C 階段新增輸出也維持「用到才算」。
+- **Notion 的使用流程是兩步**：先用 `database` 建立資料庫（`database.parent` 填頁面 ID），再把得到的 database id 填進每個 page 的 `parent`（占位符 `<建立資料庫後填入>`）。仍**未驗證能被 Notion 實際匯入**。
+- **複製失敗的退路**：複製失敗（權限被拒、非安全環境、文件未取得焦點）時，顯示原因並展開一個唯讀、自動全選的文字區（含完整內容），使用者可按 Ctrl+C，或改用下載。下載檔名會過濾路徑與 Windows 保留字元，也避開保留裝置名稱（CON、PRN、AUX、NUL、COM1–9、LPT1–9 會加上底線前綴）；Blob URL 用完即 revoke。
+- **畫布版面驗證**（面板加入右欄後；新載入頁面）：1280×900（dpr 1，兩欄）畫布 734×558，緩衝區與 controller 尺寸一致，3/3 命中測試正確；375×812（dpr 2，單欄）畫布 325×558，緩衝區 650×1116 與 DPR 相符，3/3 命中正確、無橫向捲動。**未驗證**：頁面載入後 DPR 才改變、或視窗被拖動縮放時的重設行為——內建瀏覽器的分頁處於 hidden，`ResizeObserver` 與 rAF 被暫停，實測時畫布緩衝區沒有跟著 DPR 變動（767 vs 預期 1150）；我新增了「每個 frame 檢查 `devicePixelRatio`」與 `matchMedia` 監聽來處理 DPR 改變，但這段在 hidden 分頁中無法驗證。
+
 ## Embedding 模型須知
 
 - **預設模型**：`Xenova/paraphrase-multilingual-MiniLM-L12-v2`（量化，384 維，約 118 MB，另有 tokenizer 約 17 MB），支援繁中。`npm run fetch-model` 固定到 commit `2c4055b1…`，每個檔案都寫死 byte size 與 SHA256（onnx 與 tokenizer.json 為 HF LFS 公布的 oid；小檔無上游雜湊，為一次性人工確認），下載到 `.tmp` 驗證通過才 rename。授權請自行在 HF 模型頁核對。

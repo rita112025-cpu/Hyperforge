@@ -11,6 +11,7 @@ import { useForge } from "../lib/store";
 import { getSharedDb } from "../lib/vector/shared-db";
 import { probeVectorStatus, type VectorStatus } from "../lib/vector/status";
 import DocumentList from "./DocumentList";
+import OutputsPanel from "./OutputsPanel";
 import GraphCanvas, { type CanvasContextMenuEvent } from "./GraphCanvas";
 import SourcePanel from "./SourcePanel";
 
@@ -194,7 +195,7 @@ export default function GraphWorkspace() {
         <span className="text-zinc-500">空白處拖曳＝平移 · Shift+拖曳＝框選 · 滾輪＝縮放 · 拖節點＝移動 · 右鍵＝煉成新概念</span>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
         <div ref={stageEl} className="relative h-[560px] overflow-hidden rounded-xl border border-white/10 bg-zinc-950" data-testid="graph-stage">
           <GraphCanvas controller={controller} model={model} onContextMenu={setMenu} e2e={e2e} />
 
@@ -267,13 +268,16 @@ export default function GraphWorkspace() {
           )}
         </div>
 
-        <SourcePanel
-          node={focusNode}
-          evidence={focusNode ? base.evidence[focusNode.id] : undefined}
-          docs={docsById}
-          selectedCount={sel.ids.length}
-          parentLabels={focusNode?.parents?.map((id) => nodeById.get(id)?.label ?? id)}
-        />
+        <div className="space-y-4">
+          <SourcePanel
+            node={focusNode}
+            evidence={focusNode ? base.evidence[focusNode.id] : undefined}
+            docs={docsById}
+            selectedCount={sel.ids.length}
+            parentLabels={focusNode?.parents?.map((id) => nodeById.get(id)?.label ?? id)}
+          />
+          <OutputsPanel docs={allDocs} graph={base} />
+        </div>
       </div>
 
       <DocumentList docs={docList} docInfo={docInfo} onRetry={(id) => void retryIndexing(id)} />

@@ -54,6 +54,8 @@ export default function GraphCanvas({ controller, model, onContextMenu, e2e }: P
     let dpr = 1;
     const loop = new FrameLoop((dt) => {
       const t0 = e2e ? performance.now() : 0;
+      // devicePixelRatio 在尺寸沒變時也可能改變（瀏覽器縮放、拖到不同 DPR 的螢幕）：每個 frame 檢查，變了就重設 canvas 緩衝區，避免模糊
+      if ((window.devicePixelRatio || 1) !== dpr) resize();
       controller.tick(dt);
       if (controller.consumeDirty()) {
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -83,9 +85,21 @@ export default function GraphCanvas({ controller, model, onContextMenu, e2e }: P
       controller.markDirty();
       loop.kick();
     };
+    // 休眠中（沒有 frame）時 DPR 改變：以 matchMedia 喚醒。每次 DPR 改變後要用新的值重新註冊監聽。
+    let mq: MediaQueryList | null = null;
+    const onDprChange = () => {
+      resize();
+      watchDpr();
+    };
+    const watchDpr = () => {
+      mq?.removeEventListener("change", onDprChange);
+      mq = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+      mq.addEventListener("change", onDprChange);
+    };
     const ro = new ResizeObserver(resize);
     ro.observe(wrap);
     resize();
+    watchDpr();
 
     // wheel 必須是 non-passive 的原生 listener，才能 preventDefault，滾輪只縮放圖、不帶動整頁捲動。
     const onWheel = (e: WheelEvent) => {
@@ -99,6 +113,7 @@ export default function GraphCanvas({ controller, model, onContextMenu, e2e }: P
 
     return () => {
       canvas.removeEventListener("wheel", onWheel);
+      mq?.removeEventListener("change", onDprChange);
       ro.disconnect();
       controller.onInvalidate = null;
       loop.dispose();
