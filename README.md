@@ -1,6 +1,6 @@
 # HyperForge · 混沌煉金工廠
 
-Local-first 知識煉金工廠（開發中，目前完成：投放口、管線動畫、向量庫與多語言 embedding；畫布尚未開始）。
+Local-first 知識煉金工廠（開發中，目前完成：投放口、管線動畫、向量庫與多語言 embedding、第 4 輪「Infinite Alchemy Canvas」概念圖譜畫布）。
 
 ## 開始
 
@@ -20,10 +20,56 @@ npm test
 | --- | --- |
 | PARSE / DECONSTRUCT / LINK | 文字類檔案與貼上文字為真實處理；token 為近似值（CJK 逐字、其餘以空白分詞）。LINK = 關鍵字 + 向量化（embedding → 單一 transaction 寫入 IndexedDB → 插入記憶體 HNSW）；向量化只在注入可用的 `Embedder` 時執行，否則略過並標 `indexed=false`、job 為 PARTIAL |
 | RECOMBINE / EVOLVE / MANIFEST | skipped / 未接入，進度條不動；job 完成時顯示 PARTIAL，不是 DONE |
+| 畫布（第 4 輪） | 概念圖譜 Canvas：只依賴文件文字，與 embedding 解耦；見下方「畫布」一節 |
 | PDF / 圖片 / 音訊 / 影片 / zip | 尚未支援，拖入會顯示錯誤 |
 | URL（YouTube / GitHub / 網頁） | 尚未支援（不發任何網路請求），顯示錯誤 |
 | DECONSTRUCT 進度 | 切 chunk 為同步純函式，進度一次跳到 100%，非逐塊真實進度 |
-| 中文關鍵字 | LINK 的關鍵字抽取會濾掉單字 token，中文暫無關鍵字，待後續輪次 |
+| 中文關鍵字（LINK 階段） | LINK 的關鍵字抽取會濾掉單字 token，中文暫無關鍵字（job 卡片上的列表）；畫布有獨立的概念抽取，見「畫布」一節 |
+
+## 畫布（第 4 輪 · Infinite Alchemy Canvas）
+
+資料流（圖譜只依賴「文件文字 + chunk 位移」，**不依賴向量**；embedding / 模型不可用時畫布照常運作）：
+
+```mermaid
+flowchart LR
+  J["import job 完成<br/>記憶體結果"] -->|docFromJobResult| G["buildGraph<br/>(純函式)"]
+  D[("IndexedDB<br/>docs + chunks")] -->|"loadCorpus<br/>不初始化 embedder"| G
+  G --> C["Canvas + Source panel"]
+  J -.->|"saveDocument（文字，與向量化無關）"| D
+  J -.->|"向量化（可失敗 → PARTIAL）"| V[("vectors")]
+```
+
+- **兩條來源**：剛完成的 job 直接以記憶體結果建圖（不重讀 DB）；重新整理後由 IndexedDB 的 `docs` / `chunks` 重建（只讀這兩張表，不建立 embedder）。同一份內容（SHA-256 / 相同文字）只算一次。
+- **文字先行持久化**：`saveDocument` 在向量化之前／無論成敗都寫入文字；之後若向量化成功，`VectorStore.ingest` 對同一 docId **只補寫向量**（本輪為此修改了 `index-store.ts`；舊行為是向量化成功才寫入任何資料）。
+- **向量／語意狀態**只是狀態列資訊（`lib/vector/status.ts` 對同源模型檔發 HEAD，缺模型時只發 1 個請求），畫布不等待它。
+- **概念抽取**（`lib/graph/extract.ts`）：句子 → 依 Unicode script 切 run → Latin token／Han 段（以標點與停用詞切段）→ 2–3 字 n-gram → 以「重複出現的片段覆蓋最多字」選詞（DP）→ 詞頻／文件頻率評分。**中文為統計近似，非中文斷詞**；無詞典、無 NLP tokenizer。詞需在語料中至少出現 2 次，文件至少 8 個單位才納入。
+- **人名**僅為**英文啟發式（heuristic）**（連續 2–3 個首字大寫單字，或 Dr./Mr./Ms. + 姓）；非 NER、非 AI，不支援中文人名；UI 與資料模型皆標 `heuristic`。
+- **邊**只有 co-occurrence（同一句子內共同出現，權重＝句數）。**沒有** vector-similarity／semantic 邊；那需要另開一輪設計（chunk vector → 概念證據歸屬 → 概念相似度），不可直接全對全 cosine。
+- **上限**（`lib/graph/constants.ts`）：`MAX_GRAPH_NODES = 150`、`MAX_GRAPH_EDGES = 600`；超過時依分數／權重截取，UI 明示「顯示前 150 個概念（共 N 個）」。
+- **決定性**：節點 id ＝ `kind:正規化詞`；初始位置只取決於節點 id（seeded），所以新增文件不會讓既有節點跳位；physics 無隨機數。
+- **Physics**（`lib/graph/physics.ts`）：排斥、彈簧、中心重力、阻尼、每 tick 碰撞分離、拖曳 pin、固定時間步長、休眠。O(n²) 排斥，規模設計為 ≤ 約 170 節點。位置／速度在 ref（`GraphController`），不每 frame 寫 React state；rAF 迴圈由 `FrameLoop` 管理（cleanup、單一迴圈、休眠即停）。
+- **互動**：空白處拖曳＝平移；Shift+拖曳（或「框選模式」）＝框選（任意方向）；滾輪＝以游標為中心縮放（native `{ passive: false }` + `preventDefault`）；拖節點＝pin → 移動 → 放開；點擊／Shift+點擊選取；「適合畫面」；右鍵 →「煉成新概念」。
+- **煉成新概念**：選取 ≥ 2 個節點後右鍵，產生**本機暫存**節點（可自訂名稱，預設 `A × B`）。不呼叫 AI、不寫 IndexedDB、標示「暫存」，重新整理即消失。
+- **安全**：節點名稱以 Canvas `fillText` 繪製；Source panel 只用 React text node。`lib/graph/security.test.ts` 以 hostile fixture 驗證，並掃描原始碼禁止 `innerHTML` / `dangerouslySetInnerHTML` 等。
+- **測試輔助**：網址帶 `?e2e=1` 時，頁面會掛上**唯讀**的 `window.__HYPERFORGE_E2E__`（節點螢幕座標、frame 計時），供 `scripts/e2e/` 的瀏覽器驗收使用；正式使用不需要。
+
+### 概念抽取的已知限制（皆未做準確率評估）
+
+- 中文統計近似會產生：泛用動詞／名詞（保持、安裝、施工…）、重複出現的片語被當成詞、4 字以上詞被切成兩個 2 字詞。停用詞表為手工清單，覆蓋度未評估；3 字詞凝聚度門檻 `0.8` 為經驗值，未對大型語料校準。
+- 只處理 Han 與 Latin 兩種 script（不含假名、諺文）；Latin 不做詞幹還原（單複數視為不同詞）。
+- 人名 heuristic 會把 Title Case 片語誤判為人名，也會漏掉小寫或單一名字；誤判率未量測。
+- 句子邊界為規則式（`。！？；!?;` 與換行；`.` 僅在後接空白、前非數字且非縮寫時）。
+- `buildGraph` 在**主執行緒同步**執行，且每新增一份文件就重算整個語料（Web Worker 為後續輪次）。Node 實測：2 萬字 67 ms、20 萬字 360 ms、100 萬字（隨機漢字最壞情況）約 3.2 秒。
+- 150 節點在「適合畫面」時標籤會做防碰撞省略，放大後才會出現較多標籤。
+- 尚未實作文件（source/document）節點，也沒有刪除文件的 UI。
+
+### 瀏覽器驗收
+
+```bash
+npm run build && npm start                       # 必須是正式 build
+node scripts/e2e/canvas-acceptance.cjs           # 需 Playwright；預設假設模型檔未安裝
+npx next dev -p 3100 && node scripts/e2e/strictmode-single-loop.cjs   # 另見檔頭說明的限制
+```
 
 ## 向量庫（第 2 輪）
 

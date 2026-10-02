@@ -1,5 +1,6 @@
 import type { Embedder } from "./embedder";
-import { MULTILINGUAL, requiredFiles, type ModelSpec } from "./model-spec";
+import { checkModelFiles } from "./model-files";
+import { MULTILINGUAL, type ModelSpec } from "./model-spec";
 
 /** 預留給 [CLS] / [SEP] 的 token 數 */
 const SPECIAL_TOKENS = 2;
@@ -107,19 +108,8 @@ export class TransformersEmbedder implements Embedder {
 
   async isAvailable(): Promise<boolean> {
     if (this.availableCache) return true;
-    try {
-      const results = await Promise.all(
-        requiredFiles(this.spec).map(async (url) => {
-          const res = await this.fetchFn(url, { method: "HEAD", cache: "no-store" });
-          // Next 對缺檔回 404 頁（text/html），一併排除
-          return res.ok && !(res.headers.get("content-type") ?? "").includes("text/html");
-        }),
-      );
-      this.availableCache = results.every(Boolean);
-      return this.availableCache;
-    } catch {
-      return false;
-    }
+    this.availableCache = (await checkModelFiles(this.spec, this.fetchFn)).available;
+    return this.availableCache;
   }
 
   private ensureLoaded() {

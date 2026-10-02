@@ -2,6 +2,7 @@
 import { HyperforgeDB } from "./db";
 import type { Embedder } from "./embedder";
 import { ModelMismatchError, VectorStore } from "./index-store";
+import { getSharedDb } from "./shared-db";
 import { TransformersEmbedder } from "./transformers-embedder";
 
 export interface RuntimeDeps {
@@ -51,7 +52,7 @@ export function createStoreGetter(deps: RuntimeDeps): () => Promise<StoreResult>
 }
 
 export const getVectorStore = createStoreGetter({
-  createDb: () => new HyperforgeDB(),
+  createDb: () => getSharedDb(), // 與畫布共用同一個 Dexie 實例
   createEmbedder: () => new TransformersEmbedder(),
   isBrowser: () => typeof window !== "undefined",
 });
