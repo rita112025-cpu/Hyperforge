@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background: #09090b; /* zinc-950 */
+  color: #e4e4e7;
+}
+
+/* 掃描線 */
+.scanlines::after {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 0 1px, transparent 1px 3px);
+  animation: scan 6s linear infinite;
+}
+@keyframes scan {
+  from { background-position-y: 0; }
+  to { background-position-y: 60px; }
+}
+
+/* glitch 文字 */
+.glitch {
+  position: relative;
+}
+.glitch::before,
+.glitch::after {
+  content: attr(data-text);
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  max-width: 100%;
+  clip-path: inset(0 0 0 0);
+}
+.glitch::before {
+  color: #a78bfa;
+  transform: translateX(-1px);
+  animation: glitch 1.6s steps(2, end) infinite;
+}
+.glitch::after {
+  color: #22d3ee;
+  transform: translateX(1px);
+  animation: glitch 1.1s steps(2, end) infinite reverse;
+}
+@keyframes glitch {
+  0%, 90% { clip-path: inset(0 0 100% 0); }
+  92% { clip-path: inset(20% 0 55% 0); }
+  96% { clip-path: inset(60% 0 10% 0); }
+  100% { clip-path: inset(0 0 100% 0); }
+}
