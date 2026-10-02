@@ -15,6 +15,10 @@ describe("canRetryIndexing：只對 文字已就緒 且 向量尚未完成（也
     }
     expect(canRetryIndexing(undefined)).toBe(false);
   });
+
+  it("tooLarge 的文件任何向量狀態都不開放重試（重試只會再次卡住頁面）", () => {
+    for (const vector of VECTORS) expect(canRetryIndexing({ text: "ready", vector, tooLarge: true }), vector).toBe(false);
+  });
 });
 
 describe("jobStatusFor：job 狀態只由文字與向量決定（取消與錯誤由 store 設定，不會是 partial）", () => {

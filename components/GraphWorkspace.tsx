@@ -89,13 +89,16 @@ export default function GraphWorkspace() {
     let indexed = 0;
     let building = 0;
     let incomplete = 0;
+    let tooLarge = 0;
     for (const d of docList) {
-      const v = docInfo[d.id]?.vector ?? "pending";
+      const info = docInfo[d.id];
+      const v = info?.vector ?? "pending";
       if (v === "indexed") indexed++;
       else if (v === "building") building++;
+      else if (info?.tooLarge) tooLarge++; // 過大：刻意略過，不算「未完成」，也不能重試
       else incomplete++;
     }
-    return { indexed, building, incomplete };
+    return { indexed, building, incomplete, tooLarge };
   }, [docList, docInfo]);
   const unsavedCount = useMemo(() => docList.filter((d) => docInfo[d.id]?.text === "persist_failed").length, [docList, docInfo]);
 
@@ -308,6 +311,7 @@ export default function GraphWorkspace() {
         </div>
         <div data-testid="index-summary">
           語意索引：已完成 {indexSummary.indexed} 份 · 建立中 {indexSummary.building} 份 · 未完成 {indexSummary.incomplete} 份
+          {indexSummary.tooLarge > 0 && ` · 過大而略過 ${indexSummary.tooLarge} 份（文字與圖譜不受影響）`}
           {indexSummary.incomplete > 0 && "（文字都已保留；可在下方文件清單明確「重新建立索引」，不會自動重試）"}
         </div>
         {unsavedCount > 0 && (

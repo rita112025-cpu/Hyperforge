@@ -1,3 +1,4 @@
+import { MAX_EMBED_CHUNKS, embedLimitNote, exceedsEmbedLimit } from "./limits";
 import { deconstruct, link, parse, throwIfAborted } from "./stages";
 import type { VectorStore } from "../vector/index-store";
 import type { IngestContext, IngestSource, StageId, StageState, TextCommitPayload, TextCommitResult, TextStatus, VectorStatus } from "./types";
@@ -22,6 +23,8 @@ export interface RunnerHooks {
   onTextReady?: (payload: TextCommitPayload) => Promise<TextCommitResult> | TextCommitResult;
   /** 延後取得向量庫：只在 text commit 之後才呼叫，避免向量庫初始化（重建 HNSW 等）拖慢文字進入畫布 */
   getStore?: () => Promise<StoreResolution>;
+  /** 超過這個 chunk 數就略過向量化（文字與圖譜不受影響）。預設 MAX_EMBED_CHUNKS；測試可調高。 */
+  maxEmbedChunks?: number;
   /** 直接注入向量庫（測試用；與 getStore 擇一） */
   store?: VectorStore;
   /** 直接注入 store 時，沒有 store 的原因 */
@@ -123,6 +126,13 @@ export async function runPipeline(source: IngestSource, hooks: RunnerHooks): Pro
     }
     if (text.status === "persist_failed") {
       r(1, `文字未能保存，略過向量化（避免只有衍生資料、沒有原文）。${text.note ?? ""}`);
+      return kw;
+    }
+
+    // 過大的文件只略過向量化：不取得向量庫、不載入模型，因此不會凍結頁面。文字（已 commit）與圖譜照常。
+    const limit = hooks.maxEmbedChunks ?? MAX_EMBED_CHUNKS;
+    if (exceedsEmbedLimit(chunks.length, limit)) {
+      r(1, embedLimitNote(chunks.length, limit));
       return kw;
     }
 

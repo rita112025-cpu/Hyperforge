@@ -551,3 +551,63 @@ describe("重新匯入同一份內容（Re-import semantics）", () => {
     expect(useForge.getState().docs).toHaveLength(1);
   });
 });
+
+describe("embedding 上限（MAX_EMBED_CHUNKS）：過大文件只略過向量化，文字與圖譜不受影響", () => {
+  // 詞會重複出現（才會達到概念門檻、圖譜才有節點）；chunk 數只取決於 token 數
+  const words = (n: number) => Array.from({ length: n }, (_, i) => `tray${i % 40}`).join(" ");
+  const BIG = words(9051); // 21 個 chunk（上限 20）
+  const EDGE = words(9050); // 剛好 20 個 chunk
+
+  it("21 個 chunk：不取得向量庫、不 embedding；文字保存、可建圖；job PARTIAL；文件標 tooLarge / unavailable 並說明原因", async () => {
+    mode = "ok"; // 模型可用，仍然要略過
+    const useForge = await freshStore();
+    await useForge.getState().ingest(textSource(BIG));
+    const s = useForge.getState();
+    const id = s.docs[0].id;
+    expect(chunkText(BIG)).toHaveLength(21);
+    expect(getStoreCalls).toBe(0);
+    expect(embedCalls).toBe(0);
+    expect(await counts()).toEqual({ docs: 1, chunks: 21, vectors: 0 });
+    expect(s.jobs[0].status).toBe("partial");
+    expect(s.jobs[0].vectorStatus).toBe("unavailable");
+    expect(s.docInfo[id]).toMatchObject({ text: "ready", vector: "unavailable", tooLarge: true });
+    expect(s.docInfo[id].vectorNote).toContain("文件過大");
+    expect(s.jobs[0].stages.find((st) => st.id === "LINK")?.note).toContain("上限 20");
+    expect(buildGraph(s.docs).nodes.length).toBeGreaterThan(0); // 圖譜只依賴文字
+    expect(canRetryIndexing(s.docInfo[id])).toBe(false);
+  });
+
+  it("剛好 20 個 chunk：照常向量化", async () => {
+    mode = "ok";
+    const useForge = await freshStore();
+    await useForge.getState().ingest(textSource(EDGE));
+    const s = useForge.getState();
+    expect(chunkText(EDGE)).toHaveLength(20);
+    expect(embedCalls).toBeGreaterThan(0);
+    expect(s.jobs[0].status).toBe("done");
+    expect(await counts()).toMatchObject({ docs: 1, chunks: 20, vectors: 20 });
+    expect(s.docInfo[s.docs[0].id].tooLarge).toBeUndefined();
+  });
+
+  it("直接呼叫 retryIndexing 也不能繞過上限：不 embedding、狀態維持 unavailable / tooLarge", async () => {
+    mode = "ok";
+    const useForge = await freshStore();
+    await useForge.getState().ingest(textSource(BIG));
+    const id = useForge.getState().docs[0].id;
+    await useForge.getState().retryIndexing(id); // canRetryIndexing 已是 false → 直接 no-op
+    expect(embedCalls).toBe(0);
+    expect(useForge.getState().docInfo[id]).toMatchObject({ vector: "unavailable", tooLarge: true });
+  });
+
+  it("重新整理後：由 IndexedDB 推得 tooLarge / unavailable（不是誤導的「尚未建立」+ 重試鈕）", async () => {
+    mode = "ok";
+    const useForge = await freshStore();
+    await useForge.getState().ingest(textSource(BIG));
+    const id = useForge.getState().docs[0].id;
+    const docs = await loadCorpus(testDb);
+    const info = docInfoFromDb(docs, await loadVectorPresence(testDb));
+    expect(info[id]).toMatchObject({ text: "ready", vector: "unavailable", tooLarge: true });
+    expect(canRetryIndexing(info[id])).toBe(false);
+  });
+});
+

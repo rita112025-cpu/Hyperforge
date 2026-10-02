@@ -425,3 +425,46 @@ describe("embedding 失敗 / 不可用 / 文字未保存：文字不受影響，
     await db.delete();
   });
 });
+
+describe("maxEmbedChunks：過大文件只略過向量化（runner 層）", () => {
+  const big = (n: number) => ({ kind: "text" as const, text: Array.from({ length: n }, (_, i) => `w${i}`).join(" ") });
+
+  it("超過上限：不呼叫 getStore / embed，text commit 仍發生且 chunks 完整，vectorStatus=unavailable，LINK note 說明", async () => {
+    const getStore = vi.fn(async () => ({ store: null as VectorStore | null }));
+    const onTextReady = vi.fn(async () => ({ status: "ready" as const, docId: "d1" }));
+    const notes: string[] = [];
+    const out = await runPipeline(big(9051), {
+      getStore,
+      onTextReady,
+      onStage: (id, p) => id === "LINK" && p.note && notes.push(p.note),
+    });
+    expect(chunkText(big(9051).text)).toHaveLength(21);
+    expect(getStore).not.toHaveBeenCalled();
+    expect(onTextReady).toHaveBeenCalledTimes(1);
+    expect(out.chunks).toHaveLength(21);
+    expect(out.textStatus).toBe("ready");
+    expect(out.vectorStatus).toBe("unavailable");
+    expect(notes.some((n) => n.includes("文件過大") && n.includes("21") && n.includes("20"))).toBe(true);
+  });
+
+  it("剛好等於上限：不略過（會去取得向量庫）", async () => {
+    const getStore = vi.fn(async () => ({ store: null as VectorStore | null, reason: "測試" }));
+    await runPipeline(big(9050), { getStore, onStage: () => undefined });
+    expect(getStore).toHaveBeenCalledTimes(1);
+  });
+
+  it("maxEmbedChunks 可由呼叫端調整", async () => {
+    const getStore = vi.fn(async () => ({ store: null as VectorStore | null, reason: "測試" }));
+    await runPipeline(big(2000), { getStore, maxEmbedChunks: 2, onStage: () => undefined }); // 5 個 chunk > 2
+    expect(getStore).not.toHaveBeenCalled();
+    await runPipeline(big(2000), { getStore, maxEmbedChunks: 10, onStage: () => undefined });
+    expect(getStore).toHaveBeenCalledTimes(1);
+  });
+
+  it("取消仍然生效（略過向量化的文件在 LINK 之前被取消 → AbortError）", async () => {
+    const ac = new AbortController();
+    ac.abort();
+    await expect(runPipeline(big(9051), { signal: ac.signal, onStage: () => undefined })).rejects.toThrow();
+  });
+});
+

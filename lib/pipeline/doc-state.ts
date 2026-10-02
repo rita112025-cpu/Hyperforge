@@ -10,9 +10,10 @@ export function jobStatusFor(text: TextStatus, vector: VectorStatus): Extract<Jo
 /**
  * 明確的「重新建立索引」只對 文字已就緒 且 向量尚未完成（也不在建立中）的文件開放。
  * 不會重新 PARSE / DECONSTRUCT，也不會新增 document / chunks。
+ * 超過 embedding 上限的文件（tooLarge）不開放：重試只會再次卡住頁面。
  */
 export function canRetryIndexing(info: DocInfo | undefined): boolean {
-  return !!info && info.text === "ready" && info.vector !== "indexed" && info.vector !== "building";
+  return !!info && info.text === "ready" && !info.tooLarge && info.vector !== "indexed" && info.vector !== "building";
 }
 
 export const TEXT_LABEL: Record<TextStatus, string> = {

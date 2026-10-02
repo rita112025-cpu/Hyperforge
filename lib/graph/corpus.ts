@@ -1,4 +1,5 @@
 import type { Chunk } from "../pipeline/chunker";
+import { embedLimitNote, exceedsEmbedLimit } from "../pipeline/limits";
 import type { DocInfo } from "../pipeline/types";
 import type { HyperforgeDB } from "../vector/db";
 import { sha256Hex } from "../vector/hash";
@@ -116,6 +117,10 @@ export function docInfoFromDb(docs: GraphDocument[], presence: ReadonlyMap<strin
   const out: Record<string, DocInfo> = {};
   for (const d of docs) {
     const indexed = d.chunks.length > 0 && (presence.get(d.id) ?? 0) >= d.chunks.length;
+    if (!indexed && exceedsEmbedLimit(d.chunks.length)) {
+      out[d.id] = { text: "ready", vector: "unavailable", vectorNote: embedLimitNote(d.chunks.length), tooLarge: true };
+      continue;
+    }
     out[d.id] = { text: "ready", vector: indexed ? "indexed" : "pending", ...(indexed ? {} : { vectorNote: "尚未建立語意索引" }) };
   }
   return out;

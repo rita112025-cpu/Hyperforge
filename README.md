@@ -126,6 +126,7 @@ flowchart TD
 - 英文模型 `all-MiniLM-L6-v2`（約 23 MB）腳本仍支援（`node scripts/fetch-model.mjs --model=minilm-l6`），**但不是預設**，且程式目前只載入預設模型；是否移除之後再決定。
 - **切窗**：以 tokenizer 實際 token 數切 window（不用字數猜），每窗內容 ≤ 126（`maxSeq=128` 扣掉 [CLS]/[SEP]；128 來自模型卡 `max_seq_length`，寫在 `lib/vector/model-spec.ts`，並檢查 ≤ `tokenizer.model_max_length`）。各窗分別推論，以 token 數加權平均後 L2 正規化。
 - **成本**：一個 500 近似 token 的 chunk 約切成 4–6 窗各做一次推論。實測（瀏覽器、numThreads=1、主執行緒、正式建置）：約 2,200 近似 token 的中英混合文件（6 個 chunk）熱機約 4.9 秒；首次含載入模型約 7 秒。推論期間 UI 會卡頓，Web Worker 列待辦。
+- **文件大小上限（過渡措施）**：embedding 在主執行緒執行，推論期間頁面會卡住。因此超過 `MAX_EMBED_CHUNKS`（20 個 chunk；約 50KB 英文或 27KB 中文，`lib/pipeline/limits.ts`）的文件**只略過向量化**：文字仍會保存、圖譜照常建立（文字處理很快），job 為 PARTIAL，文件標示「文件過大」且不提供「重新建立索引」。未超過上限的文件預期仍會凍結約 15–25 秒（粗估，未在低階機器量測）。改用 Web Worker 後應移除這個上限。
 - **舊資料庫**：換模型後 IndexedDB 內舊向量不可混用。偵測到時，job 的 LINK note 會顯示「向量庫為舊模型建立，需重建」並降級為 PARTIAL。重置：DevTools → Application → IndexedDB → 刪除 `hyperforge`；或在程式中呼叫 `resetVectorDb()`（`lib/vector/runtime.ts`），再重新載入頁面。
 - `@xenova/transformers` v2 已停止維護，內含較舊的 onnxruntime-web（1.14.0）。wasm 由 `scripts/copy-ort.mjs` 從該套件實際解析到的 onnxruntime-web 複製。
 - `next.config.mjs` 的 alias 只對 webpack 生效：**dev / build 請勿加 `--turbopack`**。

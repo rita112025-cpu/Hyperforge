@@ -3,6 +3,7 @@ import { create } from "zustand";
 import { contentIdOf, docFromJobResult, loadStoredDocument, saveDocument } from "./graph/corpus";
 import type { GraphDocument } from "./graph/types";
 import { canRetryIndexing, jobStatusFor } from "./pipeline/doc-state";
+import { embedLimitNote, exceedsEmbedLimit } from "./pipeline/limits";
 import { initialStages, runPipeline } from "./pipeline/runner";
 import type { DocInfo, DocVectorState, IngestJob, IngestSource, TextCommitPayload, TextCommitResult, VectorStatus } from "./pipeline/types";
 import { getVectorStore } from "./vector/runtime";
@@ -99,7 +100,9 @@ export const useForge = create<PipelineSlice>((set, get) => {
             ? { vector: "unavailable", vectorNote: "文字未能保存，不建立向量（避免只有衍生資料、沒有原文）" }
             : get().docInfo[docId]?.vector === "indexed"
               ? {}
-              : { vector: "building", vectorNote: undefined }),
+              : exceedsEmbedLimit(payload.chunks.length)
+                ? { vector: "unavailable", vectorNote: embedLimitNote(payload.chunks.length), tooLarge: true }
+                : { vector: "building", vectorNote: undefined }),
         });
         patchJob((j) => ({ ...j, textStatus: status, textNote: persist.note, docId }));
         return { status, docId, note: persist.note };
@@ -145,6 +148,11 @@ export const useForge = create<PipelineSlice>((set, get) => {
       try {
         const stored = await loadStoredDocument(getSharedDb(), docId);
         if (!stored) return setVector(docId, "failed", "IndexedDB 內找不到這份文件的文字，無法建立索引");
+        if (exceedsEmbedLimit(stored.chunks.length)) {
+          // 保險：UI 不會對 tooLarge 文件顯示重試，但直接呼叫 action 也不能繞過上限
+          patchDoc(docId, { tooLarge: true });
+          return setVector(docId, "unavailable", embedLimitNote(stored.chunks.length));
+        }
         const { store, reason } = await getVectorStore();
         if (!store) return setVector(docId, "unavailable", reason ?? "向量庫無法使用");
         if (!(await store.isAvailable())) return setVector(docId, "unavailable", reason ?? "模型未安裝（請執行 npm run fetch-model）");

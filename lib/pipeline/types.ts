@@ -63,6 +63,8 @@ export interface DocInfo {
   vectorNote?: string;
   /** retry 進行中的進度 0..1 */
   progress?: number;
+  /** 文件超過 MAX_EMBED_CHUNKS：不建立語意索引，也不開放「重新建立索引」（重試只會再卡住頁面） */
+  tooLarge?: boolean;
 }
 
 /** text commit point 交給 onTextReady 的內容：只有在 PARSE 成功且 DECONSTRUCT 完整產生 chunks 之後才會呼叫 */
