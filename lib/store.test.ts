@@ -6,8 +6,23 @@ import { HyperforgeDB } from "./vector/db";
 // 兩者都與向量化成敗無關。runtime（會碰 embedder）與 shared-db 以測試替身取代。
 let testDb: HyperforgeDB;
 let dbShouldThrow = false;
+let storeMode: "none" | "ingest-fails" = "none";
 vi.mock("./vector/runtime", () => ({
-  getVectorStore: async () => ({ store: null, reason: "模型未安裝（測試）" }),
+  getVectorStore: async () => {
+    if (storeMode === "none") return { store: null, reason: "模型未安裝（測試）" };
+    // 模型檔「存在」（isAvailable=true），但推論中途失敗：真的 VectorStore + 會失敗的 embedder
+    const { VectorStore } = await import("./vector/index-store");
+    const store = new VectorStore(testDb, {
+      id: "failing-v1",
+      dim: 64,
+      isAvailable: async () => true,
+      embed: async () => {
+        throw new Error("embed failed mid-way");
+      },
+    });
+    await store.init();
+    return { store };
+  },
 }));
 vi.mock("./vector/shared-db", () => ({
   getSharedDb: () => {
@@ -27,6 +42,7 @@ async function freshStore() {
 beforeEach(() => {
   testDb = new HyperforgeDB(`store-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   dbShouldThrow = false;
+  storeMode = "none";
 });
 afterEach(async () => {
   testDb.close();
@@ -46,6 +62,22 @@ describe("useForge.ingest：即時來源與文字持久化（與向量化無關�
     expect(s.jobs[0].persist).toMatchObject({ ok: true });
     expect([await testDb.docs.count(), await testDb.chunks.count(), await testDb.vectors.count()]).toEqual([1, s.docs[0].chunks.length, 0]);
     expect((await testDb.docs.get(s.docs[0].id))?.rawText).toBe(TEXT);
+  });
+
+  it("向量化中途失敗（模型檔存在但推論丟錯）：job 為 PARTIAL（不是 error），docs 與 IndexedDB 文字照樣寫入，畫布不空", async () => {
+    storeMode = "ingest-fails";
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const useForge = await freshStore();
+    await useForge.getState().ingest({ kind: "text", text: TEXT });
+    errSpy.mockRestore();
+    const s = useForge.getState();
+    expect(s.jobs[0].status).toBe("partial");
+    expect(s.jobs[0].error).toBeUndefined();
+    expect(s.jobs[0].context?.indexed).toBe(false);
+    expect(s.jobs[0].stages.find((x) => x.id === "LINK")?.note).toMatch(/向量化失敗：embed failed mid-way/);
+    expect(s.docs).toHaveLength(1);
+    expect(s.jobs[0].persist).toMatchObject({ ok: true });
+    expect([await testDb.docs.count(), await testDb.vectors.count()]).toEqual([1, 0]); // 文字在、向量沒有
   });
 
   it("同一份內容再匯入：docs 不重複追加，持久化回報「已存在」", async () => {

@@ -41,6 +41,7 @@ flowchart LR
 
 - **兩條來源**：剛完成的 job 直接以記憶體結果建圖（不重讀 DB）；重新整理後由 IndexedDB 的 `docs` / `chunks` 重建（只讀這兩張表，不建立 embedder）。同一份內容（SHA-256 / 相同文字）只算一次。
 - **文字先行持久化**：`saveDocument` 在向量化之前／無論成敗都寫入文字；之後若向量化成功，`VectorStore.ingest` 對同一 docId **只補寫向量**（本輪為此修改了 `index-store.ts`；舊行為是向量化成功才寫入任何資料）。
+- **向量化失敗只降級，不影響畫布**：`runPipeline` 的 LINK 階段把 `isAvailable` / `ingest` 的任何失敗（模型檔存在但載入或推論失敗等）降級為 `indexed=false`（job 為 PARTIAL，LINK 註記失敗原因，不使用假向量），文字照常進畫布與 IndexedDB；只有取消（AbortError）會往外丟。
 - **向量／語意狀態**只是狀態列資訊（`lib/vector/status.ts` 對同源模型檔發 HEAD，缺模型時只發 1 個請求），畫布不等待它。
 - **概念抽取**（`lib/graph/extract.ts`）：句子 → 依 Unicode script 切 run → Latin token／Han 段（以標點與停用詞切段）→ 2–3 字 n-gram → 以「重複出現的片段覆蓋最多字」選詞（DP）→ 詞頻／文件頻率評分。**中文為統計近似，非中文斷詞**；無詞典、無 NLP tokenizer。詞需在語料中至少出現 2 次，文件至少 8 個單位才納入。
 - **人名**僅為**英文啟發式（heuristic）**（連續 2–3 個首字大寫單字，或 Dr./Mr./Ms. + 姓）；非 NER、非 AI，不支援中文人名；UI 與資料模型皆標 `heuristic`。
@@ -60,6 +61,7 @@ flowchart LR
 - 人名 heuristic 會把 Title Case 片語誤判為人名，也會漏掉小寫或單一名字；誤判率未量測。
 - 句子邊界為規則式（`。！？；!?;` 與換行；`.` 僅在後接空白、前非數字且非縮寫時）。
 - `buildGraph` 在**主執行緒同步**執行，且每新增一份文件就重算整個語料（Web Worker 為後續輪次）。Node 實測：2 萬字 67 ms、20 萬字 360 ms、100 萬字（隨機漢字最壞情況）約 3.2 秒。
+- 畫布在 job **完成時**才取得該文件（記憶體結果），所以向量化較慢時（真模型約數秒，且在主執行緒）畫布也要等到向量化結束；向量化「失敗」不會讓畫布空白，但「慢」會讓它晚出現。
 - 150 節點在「適合畫面」時標籤會做防碰撞省略，放大後才會出現較多標籤。
 - 尚未實作文件（source/document）節點，也沒有刪除文件的 UI。
 
@@ -67,7 +69,7 @@ flowchart LR
 
 ```bash
 npm run build && npm start                       # 必須是正式 build
-node scripts/e2e/canvas-acceptance.cjs           # 需 Playwright；預設假設模型檔未安裝
+node scripts/e2e/canvas-acceptance.cjs           # 需 Playwright；預設假設模型檔未安裝；E2E_ONLY=embed-failure 只跑「模型檔看似存在但載入失敗」那一步
 npx next dev -p 3100 && node scripts/e2e/strictmode-single-loop.cjs   # 另見檔頭說明的限制
 ```
 

@@ -25,6 +25,8 @@ function loadPlaywright() {
 }
 const { chromium } = loadPlaywright();
 
+/** E2E_ONLY=embed-failure 只跑「模型檔看似存在但載入失敗」那一步 */
+const ONLY = process.env.E2E_ONLY || "";
 const OUT = process.env.E2E_OUT || fs.mkdtempSync(path.join(os.tmpdir(), "hyperforge-e2e-"));
 const BASE = `${process.env.HYPERFORGE_URL || "http://localhost:3000"}/?e2e=1`;
 console.log("output dir:", OUT);
@@ -136,7 +138,7 @@ async function main() {
   console.log("chromium", browser.version(), "| headless | cpus", require("os").cpus().length);
 
   // ───────────────────────── Part A：繁中匯入、互動、來源、alchemy、reload ─────────────────────────
-  {
+  if (!ONLY) {
     const { page, log, context } = await newPage(browser);
     await page.goto(BASE, { waitUntil: "networkidle" });
     await page.waitForFunction(() => window.__HYPERFORGE_E2E__ !== undefined);
@@ -451,7 +453,7 @@ async function main() {
   }
 
   // ───────────────────────── Part B：150-node FPS / frame time ─────────────────────────
-  {
+  if (!ONLY) {
     const { page, log, context } = await newPage(browser);
     await page.goto(BASE, { waitUntil: "networkidle" });
     await page.waitForFunction(() => window.__HYPERFORGE_E2E__ !== undefined);
@@ -506,6 +508,32 @@ async function main() {
     await page.waitForTimeout(1500);
     const idle = await page.evaluate(() => { window.__raf.on = false; return window.__raf.stamps.length; });
     rec("13c. physics 休眠後 rAF 迴圈停止（1.5 秒內 app frame = 0；不空轉）", idle === 0, { rAFcallbacksIn1500ms: idle });
+    await context.close();
+  }
+
+  // ───────────────────────── Part C：模型檔「看似存在」但載入／推論失敗（審查意見 [阻擋]1 的真實瀏覽器重現） ─────────────────────────
+  if (!ONLY || ONLY === "embed-failure") {
+    const { page, log, context } = await newPage(browser);
+    // HEAD 探測回 200（isAvailable = true），但實際載入模型的 GET 仍是 404 → 真的 TransformersEmbedder 在向量化階段失敗
+    await page.route("**/models/**", (route) =>
+      route.request().method() === "HEAD"
+        ? route.fulfill({ status: 200, headers: { "content-type": "application/octet-stream" }, body: "" })
+        : route.continue(),
+    );
+    await page.goto(BASE, { waitUntil: "networkidle" });
+    await page.waitForFunction(() => window.__HYPERFORGE_E2E__ !== undefined);
+    await upload(page, "電纜橋架規範.txt", ZH_DOC);
+    await page.waitForFunction(
+      () => /PARTIAL|ERROR/.test(document.querySelector("main")?.innerText ?? "") && document.querySelectorAll('[data-testid="persist-note"]').length >= 1,
+      null,
+      { timeout: 60000 },
+    ).catch(() => {});
+    const text = await page.locator("main").innerText();
+    rec("14. 向量化失敗（模型檔看似存在、載入失敗）：job 是 PARTIAL，不是 ERROR", /PARTIAL/.test(text) && !/\bERROR\b/.test(text), text.match(/(PARTIAL|ERROR)[^\n]*/)?.[0]);
+    rec("14. LINK 階段如實註記「向量化失敗」且不使用假向量", /向量化失敗/.test(text) && /不使用假向量/.test(text));
+    const nodes = await page.evaluate(() => window.__HYPERFORGE_E2E__.snapshot().nodes.map((n) => n.label)).catch(() => []);
+    rec("14. 畫布仍有概念（電纜槽 / 橋架 / 弱電）——不是『embedding 成功才有圖』", ["電纜槽", "橋架", "弱電"].every((w) => nodes.includes(w)), nodes.length);
+    rec("14. 文字仍持久化到 IndexedDB", /文字已存入 IndexedDB/.test(await page.locator('[data-testid="persist-note"]').first().innerText().catch(() => "")));
     await context.close();
   }
 

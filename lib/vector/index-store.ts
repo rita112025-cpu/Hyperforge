@@ -50,8 +50,13 @@ export class VectorStore {
     return this.index?.size ?? 0;
   }
 
-  private async hasVectors(docId: string): Promise<boolean> {
-    return (await this.db.vectors.where("docId").equals(docId).count()) > 0;
+  /**
+   * 該內容是否「已完整寫入」：doc 存在，且（沒有任何 chunk 需要向量，或向量已存在）。
+   * 只有 doc 沒有向量 = 文字先前已由 saveDocument 持久化（當時 embedder 不可用），需要補寫向量。
+   */
+  private async isIndexed(docId: string, chunkCount: number): Promise<boolean> {
+    if (!(await this.db.docs.get(docId))) return false;
+    return chunkCount === 0 || (await this.db.vectors.where("docId").equals(docId).count()) > 0;
   }
 
   /** 檢查 meta（model/dim 不符則拒絕），並由 vectors 表在記憶體中重建 HNSW。 */
@@ -90,7 +95,7 @@ export class VectorStore {
     if (!this.index) throw new Error("VectorStore.init() 尚未呼叫");
     const docId = await sha256Hex(input.rawText);
     const existing = await this.db.docs.get(docId);
-    if (existing && (await this.hasVectors(docId))) {
+    if (await this.isIndexed(docId, input.chunks.length)) {
       report(1);
       return { docId, duplicate: true };
     }
@@ -131,7 +136,7 @@ export class VectorStore {
       });
     } catch (e) {
       // 並發 ingest 同一內容：另一個 job 先寫入，transaction 已回滾；視為「已存在」
-      if (isConstraintError(e) && (await db.docs.get(docId)) && (await this.hasVectors(docId))) {
+      if (isConstraintError(e) && (await this.isIndexed(docId, chunks.length))) {
         report(1);
         return { docId, duplicate: true };
       }

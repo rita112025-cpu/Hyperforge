@@ -144,4 +144,16 @@ describe("VectorStore", () => {
     await db.meta.put({ key: "schemaVersion", value: 999 });
     await expect(store.init()).rejects.toThrow("schema");
   });
+
+  it("沒有 chunk 的文件（不需要向量）：第一次寫入 doc，第二次視為 duplicate，不重複寫入（與原行為一致）", async () => {
+    const { db, store } = fresh();
+    await store.init();
+    const empty = { name: "empty.md", rawText: "   ", chunks: [] };
+    const first = await store.ingest(empty, () => undefined);
+    expect(first.duplicate).toBe(false);
+    expect([await db.docs.count(), await db.chunks.count(), await db.vectors.count()]).toEqual([1, 0, 0]);
+    const second = await store.ingest(empty, () => undefined);
+    expect(second.duplicate).toBe(true); // docs 已存在且沒有任何 chunk 需要向量
+    expect(await db.docs.count()).toBe(1);
+  });
 });

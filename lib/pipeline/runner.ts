@@ -19,6 +19,8 @@ const SKIPPED: Record<string, string> = {
   MANIFEST: "未接入（待畫布 / 輸出輪次）",
 };
 
+const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
 export function initialStages(): StageState[] {
   return STAGE_ORDER.map((id) => ({ id, status: id in SKIPPED ? "skipped" : "idle", progress: 0, note: SKIPPED[id] }));
 }
@@ -50,17 +52,36 @@ export async function runPipeline(source: IngestSource, hooks: RunnerHooks): Pro
   let indexed = false;
   const keywords = await step("LINK", async (r) => {
     const store = hooks.store;
-    const canEmbed = store ? await store.isAvailable() : false;
+    // 向量化是「附加能力」：isAvailable / ingest 任何失敗都只降級為 indexed=false（job 走 PARTIAL），
+    // 文字（rawText / chunks）照常交回，畫布與文字持久化不能因為 embedding 失敗而拿不到資料。
+    // 取消（AbortError，或取消之後才丟出的任何錯誤）仍照舊往外丟。
+    let canEmbed = false;
+    let probeError: unknown;
+    if (store) {
+      try {
+        canEmbed = await store.isAvailable();
+      } catch (e) {
+        probeError = e;
+      }
+    }
     // 有向量化：關鍵字佔前 20%，向量化佔後 80%
     const kw = await link(chunks, (p) => r(canEmbed ? p * 0.2 : p), signal);
     if (!store || !canEmbed) {
-      r(1, `向量化略過：${hooks.storeUnavailableReason ?? "模型未安裝"}（不使用假向量）`);
+      const why = probeError ? `向量化可用性檢查失敗：${errMsg(probeError)}` : (hooks.storeUnavailableReason ?? "模型未安裝");
+      if (probeError) console.error("[hyperforge] 向量化可用性檢查失敗，略過向量化：", probeError);
+      r(1, `向量化略過：${why}（不使用假向量）`);
       return kw;
     }
-    const res = await store.ingest({ name, rawText, chunks }, (p) => r(0.2 + p * 0.8, `向量化 ${Math.round(p * 100)}%`), signal);
-    docId = res.docId;
-    indexed = true;
-    if (res.duplicate) r(1, "內容已存在，未重複寫入");
+    try {
+      const res = await store.ingest({ name, rawText, chunks }, (p) => r(0.2 + p * 0.8, `向量化 ${Math.round(p * 100)}%`), signal);
+      docId = res.docId;
+      indexed = true;
+      if (res.duplicate) r(1, "內容已存在，未重複寫入");
+    } catch (e) {
+      if (signal?.aborted || (e instanceof DOMException && e.name === "AbortError")) throw new DOMException("Aborted", "AbortError");
+      console.error("[hyperforge] 向量化失敗，略過（文字仍會進入畫布）：", e);
+      r(1, `向量化失敗：${errMsg(e)}（不使用假向量；文字仍會進入畫布）`);
+    }
     return kw;
   });
   return { name, rawText, chunks, keywords, docId, indexed };
