@@ -3,7 +3,7 @@ import { HyperforgeDB } from "./db";
 import type { Embedder } from "./embedder";
 import { ModelMismatchError, VectorStore } from "./index-store";
 import { getSharedDb } from "./shared-db";
-import { TransformersEmbedder } from "./transformers-embedder";
+import { WorkerEmbedder } from "./worker-embedder";
 
 export interface RuntimeDeps {
   createDb: () => HyperforgeDB;
@@ -32,7 +32,7 @@ export function createStoreGetter(deps: RuntimeDeps): () => Promise<StoreResult>
       try {
         const store = new VectorStore(deps.createDb(), deps.createEmbedder());
         if (!(await store.isAvailable())) {
-          return { store: null, reason: "模型未安裝（請執行 npm run fetch-model）" };
+          return { store: null, reason: store.embedder.unavailableReason?.() ?? "模型未安裝（請執行 npm run fetch-model）" };
         }
         await store.init();
         return { store };
@@ -53,9 +53,12 @@ export function createStoreGetter(deps: RuntimeDeps): () => Promise<StoreResult>
 
 export const getVectorStore = createStoreGetter({
   createDb: () => getSharedDb(), // 與畫布共用同一個 Dexie 實例
-  createEmbedder: () => new TransformersEmbedder(),
+  createEmbedder: () => new WorkerEmbedder(), // 推論在 Web Worker，不佔用主執行緒
   isBrowser: () => typeof window !== "undefined",
 });
+
+// 開發時 HMR 重建這個模組會讓舊的 WorkerEmbedder 成為孤兒（Worker 仍佔著記憶體與 CPU）；模組被替換前先全部終止。
+(import.meta as unknown as { webpackHot?: { dispose(cb: () => void): void } }).webpackHot?.dispose(() => WorkerEmbedder.disposeAll());
 
 /** 開發用：刪除整個向量庫（換模型或資料損毀時用）。呼叫後請重新載入頁面。 */
 export async function resetVectorDb(name = "hyperforge"): Promise<void> {

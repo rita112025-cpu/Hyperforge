@@ -106,7 +106,7 @@ export class VectorStore {
     for (let i = 0; i < chunks.length; i += BATCH) {
       abortIfNeeded(signal);
       const batch = chunks.slice(i, i + BATCH);
-      const out = await this.embedder.embed(batch.map((c) => c.text));
+      const out = await this.embedder.embed(batch.map((c) => c.text), { signal });
       if (out.length !== batch.length) throw new Error("embedder 回傳數量與輸入不符");
       for (const v of out) {
         if (v.length !== this.embedder.dim) throw new Error(`向量維度 ${v.length} ≠ ${this.embedder.dim}`);

@@ -103,7 +103,7 @@ flowchart TD
 
 ### 第 5 輪的已知限制
 
-- embedding 仍在**主執行緒**執行（Web Worker 為後續輪次）：推論期間 UI 仍會卡頓；取消只能讓結果被丟棄，無法中止進行中的推論，背景會繼續佔用 CPU 到它結束。
+- embedding 在 **Web Worker** 執行（`lib/vector/embed.worker.ts`，主執行緒只傳訊息）：**embedding 期間主執行緒沒有長任務**（只有推論離開了主執行緒；`deconstruct` 切 chunk 與 `buildGraph` 仍在主執行緒，不要解讀成「整頁都不卡」）。Worker 一次只處理一個請求（FIFO 佇列），多檔並發時其餘排隊。取消**進行中**的請求會終止 Worker 以真的停止運算（模型在下次需要時於新 Worker 重新載入，約 2 秒），佇列中尚未開始的請求在新 Worker 上**重新派送**（不是失敗重試：被取消或失敗的請求不會再執行）；取消**佇列中**的請求只是把它移出佇列。Worker 自己出錯時，進行中的請求失敗、不自動重試。Worker 只在第一次 embed 時建立；開發時 HMR 重建模組會先終止舊的 Worker。Worker 不可用時**不退回主執行緒**（會再次凍結），向量化直接降級為「不可用（Worker 不可用）」。
 - 「重新建立索引」進行中**不可取消**，也沒有逐 chunk 進度（只有整份文件的進度回報）。
 - 重新整理後無法區分「先前是失敗 / 取消 / 模型不可用」，一律顯示「尚未建立」。
 - 已結束的 job（cancelled / partial）本身的狀態不會因為之後 retry 成功而改變（那是歷史事實）；卡片與文件清單上的「語意索引」欄顯示的是**文件目前的狀態**。
@@ -125,8 +125,13 @@ flowchart TD
 - **預設模型**：`Xenova/paraphrase-multilingual-MiniLM-L12-v2`（量化，384 維，約 118 MB，另有 tokenizer 約 17 MB），支援繁中。`npm run fetch-model` 固定到 commit `2c4055b1…`，每個檔案都寫死 byte size 與 SHA256（onnx 與 tokenizer.json 為 HF LFS 公布的 oid；小檔無上游雜湊，為一次性人工確認），下載到 `.tmp` 驗證通過才 rename。授權請自行在 HF 模型頁核對。
 - 英文模型 `all-MiniLM-L6-v2`（約 23 MB）腳本仍支援（`node scripts/fetch-model.mjs --model=minilm-l6`），**但不是預設**，且程式目前只載入預設模型；是否移除之後再決定。
 - **切窗**：以 tokenizer 實際 token 數切 window（不用字數猜），每窗內容 ≤ 126（`maxSeq=128` 扣掉 [CLS]/[SEP]；128 來自模型卡 `max_seq_length`，寫在 `lib/vector/model-spec.ts`，並檢查 ≤ `tokenizer.model_max_length`）。各窗分別推論，以 token 數加權平均後 L2 正規化。
-- **成本**：一個 500 近似 token 的 chunk 約切成 4–6 窗各做一次推論。實測（瀏覽器、numThreads=1、主執行緒、正式建置）：約 2,200 近似 token 的中英混合文件（6 個 chunk）熱機約 4.9 秒；首次含載入模型約 7 秒。推論期間 UI 會卡頓，Web Worker 列待辦。
-- **文件大小上限（過渡措施）**：embedding 在主執行緒執行，推論期間頁面會卡住。因此超過 `MAX_EMBED_CHUNKS`（20 個 chunk；約 50KB 英文或 27KB 中文，`lib/pipeline/limits.ts`）的文件**只略過向量化**：文字仍會保存、圖譜照常建立（文字處理很快），job 為 PARTIAL，文件標示「文件過大」且不提供「重新建立索引」。未超過上限的文件預期仍會凍結約 15–25 秒（粗估，未在低階機器量測）。改用 Web Worker 後應移除這個上限。
+- **成本**：一個 500 近似 token 的 chunk 約切成 4–6 窗各做一次推論（CPU 時間不變，只是不再佔用主執行緒）。實測（瀏覽器、numThreads=1、正式建置）：約 2,200 近似 token 的中英混合文件（6 個 chunk）熱機約 4.9 秒；改用 Worker 後（瀏覽器、正式建置）：約 3,800 近似 token（8 個 chunk）含載入模型約 12.5 秒；剛好 20 個 chunk（9,049 個近似 token）約 30.0 秒，期間 `longtask`（>50ms）只有 1 次、172ms，10ms 計時器的最大間隔 174ms；2 份文件並發、取消其中一份，被取消的 50ms 內結束，另一份在新 Worker 上 2.0 秒完成。**畫布 fps 沒有量到**：內建瀏覽器的分頁處於 hidden，requestAnimationFrame 被暫停。改用前同樣的工作會讓主執行緒整段時間都凍結。
+- **Worker 的限制與未驗證項**：
+  - 那 1 次 172ms 的 longtask 超過 <100ms 的目標，**來源未查證**：推論在 Worker，所以多半不是推論；可能來自主執行緒的 `deconstruct`、`buildGraph` 或結果寫入，但沒有用 Performance 面板確認，不要當成已解釋。
+  - **未驗證**：畫布 fps（內建瀏覽器分頁為 hidden，rAF 被暫停，量不到）；開發時 HMR 熱更新是否確實終止舊 Worker（只驗證了 `WorkerEmbedder.disposeAll()` 本身）；低階機器；取消後 CPU 確實停止只有間接證據（取消後下一份小文件 2.1 秒完成），沒有用 DevTools 直接看。
+  - **Worker 卡死（沒有回應）時沒有逾時機制**，只能由使用者取消。`postMessage` 失敗（例如 DataCloneError）會改回傳錯誤，不會讓請求懸著。
+  - Worker 內仍是單執行緒推論（`numThreads=1`），吞吐量沒有提升。
+- **文件大小上限**（Worker 之前為了避免凍結頁面而加入，**目前仍保留，是否移除／改為「運算時間保護」待決定**）：超過 `MAX_EMBED_CHUNKS`（20 個 chunk；約 50KB 英文或 27KB 中文，`lib/pipeline/limits.ts`）的文件**只略過向量化**：文字仍會保存、圖譜照常建立（文字處理很快），job 為 PARTIAL，文件標示「文件過大」且不提供「重新建立索引」。Worker 之後頁面不再凍結，但 CPU 時間不變（0.6MB 單檔仍需數分鐘，只是可取消、頁面可操作），所以上限現在是「運算時間保護」，不是「凍結保護」。
 - **舊資料庫**：換模型後 IndexedDB 內舊向量不可混用。偵測到時，job 的 LINK note 會顯示「向量庫為舊模型建立，需重建」並降級為 PARTIAL。重置：DevTools → Application → IndexedDB → 刪除 `hyperforge`；或在程式中呼叫 `resetVectorDb()`（`lib/vector/runtime.ts`），再重新載入頁面。
 - `@xenova/transformers` v2 已停止維護，內含較舊的 onnxruntime-web（1.14.0）。wasm 由 `scripts/copy-ort.mjs` 從該套件實際解析到的 onnxruntime-web 複製。
 - `next.config.mjs` 的 alias 只對 webpack 生效：**dev / build 請勿加 `--turbopack`**。
@@ -150,7 +155,7 @@ flowchart TD
 
 ## 待辦備忘
 
-- embedding 目前在主執行緒推論（numThreads=1，避免需要 COOP/COEP），應改 Web Worker。
+- embedding 的 `numThreads=1`（多執行緒需 COOP/COEP）；Worker 內仍是單執行緒推論，吞吐量沒有提升。
 - 巨檔切 chunk 會同步佔用主執行緒，需改為分批或 Worker。
 - `Chunk` 的 start/end 位移已就緒；之後存 DB 需定 schema 版本。
 - 若 `framer-motion` 與 React 19 出現 peer 衝突，請以 `^12` 為準。

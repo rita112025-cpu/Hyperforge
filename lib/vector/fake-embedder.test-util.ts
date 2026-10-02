@@ -1,5 +1,5 @@
 import { tokenize } from "../pipeline/chunker";
-import type { Embedder } from "./embedder";
+import type { EmbedOptions, Embedder } from "./embedder";
 
 /** 測試用：決定性的 hashed bag-of-tokens 向量。不是真的語意向量，禁止在產品路徑使用（lib/no-fake-in-product.test.ts 會檢查）。 */
 export class FakeEmbedder implements Embedder {
@@ -13,7 +13,7 @@ export class FakeEmbedder implements Embedder {
     return this.available;
   }
 
-  async embed(texts: string[]): Promise<Float32Array[]> {
+  async embed(texts: string[], _opts?: EmbedOptions): Promise<Float32Array[]> {
     return texts.map((t) => {
       const v = new Float32Array(this.dim);
       for (const tok of tokenize(t.toLowerCase())) {

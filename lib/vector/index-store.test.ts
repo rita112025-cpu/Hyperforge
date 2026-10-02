@@ -170,4 +170,21 @@ describe("VectorStore", () => {
     expect(await db.vectors.count()).toBe(n);
     expect(await db.docs.count()).toBe(1);
   });
+
+  it("ingest 把 AbortSignal 傳給 embedder.embed（讓 Worker 實作能真的停止運算）", async () => {
+    const embedder = new FakeEmbedder(8);
+    const seen: Array<AbortSignal | undefined> = [];
+    const orig = embedder.embed.bind(embedder);
+    vi.spyOn(embedder, "embed").mockImplementation(async (texts, opts) => {
+      seen.push(opts?.signal);
+      return orig(texts);
+    });
+    const { store } = fresh(undefined, embedder);
+    await store.init();
+    const ac = new AbortController();
+    await store.ingest(input(text(300)), () => undefined, ac.signal);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((s) => s === ac.signal)).toBe(true);
+  });
 });
+

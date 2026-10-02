@@ -1,4 +1,4 @@
-import type { Embedder } from "./embedder";
+import type { EmbedOptions, Embedder } from "./embedder";
 import { checkModelFiles } from "./model-files";
 import { MULTILINGUAL, type ModelSpec } from "./model-spec";
 
@@ -127,7 +127,8 @@ export class TransformersEmbedder implements Embedder {
     return this.loaded;
   }
 
-  async embed(texts: string[]): Promise<Float32Array[]> {
+  /** opts 保留給介面相容；取消由外層（WorkerEmbedder 終止 Worker）處理，這裡不處理 signal。 */
+  async embed(texts: string[], _opts?: EmbedOptions): Promise<Float32Array[]> {
     if (!texts.length) return [];
     const { extractor, tokenizer } = await this.ensureLoaded();
     const windows: string[] = [];
