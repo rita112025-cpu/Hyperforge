@@ -52,6 +52,11 @@ export default function PipelineView() {
             ))}
           </ol>
           {job.error && <div className="mt-3 text-xs text-red-400">{job.error}</div>}
+          {job.persist && (
+            <div className={`mt-2 text-[11px] ${job.persist.ok ? "text-zinc-500" : "text-amber-300/90"}`} data-testid="persist-note">
+              {job.persist.note}
+            </div>
+          )}
           {job.context && (
             <div className="mt-3 text-[11px] text-zinc-500">
               {job.context.chunks.length} chunks · 關鍵字：{job.context.keywords.slice(0, 8).join("、") || "—（中文關鍵字待 embedding 輪次）"}

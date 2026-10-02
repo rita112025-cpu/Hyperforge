@@ -50,6 +50,15 @@ export class VectorStore {
     return this.index?.size ?? 0;
   }
 
+  /**
+   * 該內容是否「已完整寫入」：doc 存在，且（沒有任何 chunk 需要向量，或向量已存在）。
+   * 只有 doc 沒有向量 = 文字先前已由 saveDocument 持久化（當時 embedder 不可用），需要補寫向量。
+   */
+  private async isIndexed(docId: string, chunkCount: number): Promise<boolean> {
+    if (!(await this.db.docs.get(docId))) return false;
+    return chunkCount === 0 || (await this.db.vectors.where("docId").equals(docId).count()) > 0;
+  }
+
   /** 檢查 meta（model/dim 不符則拒絕），並由 vectors 表在記憶體中重建 HNSW。 */
   async init(): Promise<void> {
     const current: EmbedMeta = { model: this.embedder.id, dim: this.embedder.dim };
@@ -85,10 +94,12 @@ export class VectorStore {
   ): Promise<IngestResult> {
     if (!this.index) throw new Error("VectorStore.init() 尚未呼叫");
     const docId = await sha256Hex(input.rawText);
-    if (await this.db.docs.get(docId)) {
+    const existing = await this.db.docs.get(docId);
+    if (await this.isIndexed(docId, input.chunks.length)) {
       report(1);
       return { docId, duplicate: true };
     }
+    // existing 但沒有向量 = 文字先前已由 saveDocument 持久化（當時 embedder 不可用）；只補寫 chunks 與向量。
 
     const { chunks } = input;
     const vectors: Float32Array[] = [];
@@ -117,13 +128,15 @@ export class VectorStore {
     const { db } = this;
     try {
       await db.transaction("rw", db.docs, db.chunks, db.vectors, async () => {
-        await db.docs.add({ id: docId, name: input.name, createdAt: Date.now(), chunkCount: chunks.length, rawText: input.rawText });
-        await db.chunks.bulkAdd(chunkRows);
+        if (!existing) {
+          await db.docs.add({ id: docId, name: input.name, createdAt: Date.now(), chunkCount: chunks.length, rawText: input.rawText });
+        }
+        await db.chunks.bulkPut(chunkRows); // 文字先行持久化時已存在，內容相同（決定性主鍵）
         await db.vectors.bulkAdd(ids.map((id, i) => ({ id, docId, vec: vectors[i] })));
       });
     } catch (e) {
       // 並發 ingest 同一內容：另一個 job 先寫入，transaction 已回滾；視為「已存在」
-      if (isConstraintError(e) && (await db.docs.get(docId))) {
+      if (isConstraintError(e) && (await this.isIndexed(docId, chunks.length))) {
         report(1);
         return { docId, duplicate: true };
       }

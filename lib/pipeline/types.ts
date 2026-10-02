@@ -50,4 +50,6 @@ export interface IngestJob {
   status: "running" | "done" | "partial" | "error" | "cancelled";
   error?: string;
   context?: IngestContext;
+  /** 文字（docs + chunks，不含向量）持久化到 IndexedDB 的結果；與向量化成敗無關 */
+  persist?: { ok: boolean; note: string };
 }
