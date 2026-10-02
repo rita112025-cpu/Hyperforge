@@ -1,0 +1,30 @@
+{
+  "description": "繁中語意 regression baseline：句子兩兩 cosine 相似度（向量為 L2 正規化，故為內積）",
+  "model": {
+    "id": "Xenova/paraphrase-multilingual-MiniLM-L12-v2@2c4055b(quantized)",
+    "repo": "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
+    "revision": "2c4055b12046f11709e9df2c122e59ffbdc2f900",
+    "onnxFile": "onnx/model_quantized.onnx",
+    "onnxSha256": "66fc00f5f29afcaff34092e1bdd20008ca3918265a82fb9695a551e510cc4ebc",
+    "runtime": "@xenova/transformers 2.17.2 + onnxruntime-web 1.14.0 (wasm, numThreads=1)",
+    "maxSeq": 128
+  },
+  "acquired": {
+    "date": "2026-10-02",
+    "method": "瀏覽器（next start 正式建置，localhost:3000）模擬 drop 4 個 .md 檔，各含單一句子；從 IndexedDB 'hyperforge' 的 vectors 表讀出向量計算內積。vitest 不載入真模型，因此此檔只能由瀏覽器重新取得。"
+  },
+  "sentences": {
+    "A": { "topic": "管線間距", "text": "電纜槽與通信線纜架需要保持淨距" },
+    "B": { "topic": "管線間距", "text": "弱電橋架與其他管線應保持安全間距" },
+    "C": { "topic": "烹飪", "text": "義大利麵煮熟後加入橄欖油" },
+    "D": { "topic": "火星", "text": "火星表面存在大量氧化鐵" }
+  },
+  "matrix": {
+    "A": { "A": 1, "B": 0.7343, "C": -0.0978, "D": -0.0065 },
+    "B": { "A": 0.7343, "B": 1, "C": -0.0161, "D": -0.0444 },
+    "C": { "A": -0.0978, "B": -0.0161, "C": 1, "D": 0.0551 },
+    "D": { "A": -0.0065, "B": -0.0444, "C": 0.0551, "D": 1 }
+  },
+  "tolerance": 0.02,
+  "note": "換模型 / revision / 切窗邏輯後，請重新取得並與此檔比對；同主題（A–B）相似度須明顯高於所有異主題配對。"
+}

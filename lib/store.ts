@@ -34,10 +34,11 @@ export const useForge = create<PipelineSlice>((set) => ({
       jobs: [{ id, name: sourceName(source), stages: initialStages(), status: "running" }, ...s.jobs],
     }));
     try {
-      const store = (await getVectorStore()) ?? undefined;
+      const { store, reason } = await getVectorStore();
       const context = await runPipeline(source, {
         signal: ac.signal,
-        store,
+        store: store ?? undefined,
+        storeUnavailableReason: reason,
         onStage: (stageId, patch) =>
           patchJob((j) => ({ ...j, stages: j.stages.map((st) => (st.id === stageId ? { ...st, ...patch } : st)) })),
       });

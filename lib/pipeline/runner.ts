@@ -8,6 +8,8 @@ export interface RunnerHooks {
   signal?: AbortSignal;
   /** 注入向量庫；未提供或 embedder 不可用時，LINK 只做關鍵字並標記 indexed=false */
   store?: VectorStore;
+  /** 沒有 store 時的原因（顯示在 LINK 的 note） */
+  storeUnavailableReason?: string;
 }
 
 /** 本輪尚未接入實作的階段：標 skipped，進度條不動。 */
@@ -52,7 +54,7 @@ export async function runPipeline(source: IngestSource, hooks: RunnerHooks): Pro
     // 有向量化：關鍵字佔前 20%，向量化佔後 80%
     const kw = await link(chunks, (p) => r(canEmbed ? p * 0.2 : p), signal);
     if (!store || !canEmbed) {
-      r(1, "向量化略過：模型未安裝（不使用假向量）");
+      r(1, `向量化略過：${hooks.storeUnavailableReason ?? "模型未安裝"}（不使用假向量）`);
       return kw;
     }
     const res = await store.ingest({ name, rawText, chunks }, (p) => r(0.2 + p * 0.8, `向量化 ${Math.round(p * 100)}%`), signal);
