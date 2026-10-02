@@ -65,10 +65,14 @@ export default function PipelineView() {
             >
               {job.name}
             </span>
-            <span className="flex shrink-0 items-center gap-2 text-xs text-zinc-500">
+            <span className="flex shrink-0 items-center gap-2 text-xs text-zinc-500" data-testid="job-status" data-status={job.status}>
               {JOB_LABEL[job.status]}
               {job.status === "running" && (
-                <button className="rounded border border-white/10 px-1.5 hover:border-red-400 hover:text-red-300" onClick={() => cancel(job.id)}>
+                <button
+                  className="rounded border border-white/10 px-1.5 hover:border-red-400 hover:text-red-300"
+                  onClick={() => cancel(job.id)}
+                  data-testid="cancel-job"
+                >
                   取消
                 </button>
               )}

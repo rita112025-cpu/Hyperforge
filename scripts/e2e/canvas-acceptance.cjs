@@ -8,6 +8,10 @@
  * 需求：Playwright（專案不依賴它；腳本會找 require("playwright")，找不到就找全域 npm root）。
  * 環境變數：HYPERFORGE_URL（預設 http://localhost:3000）、E2E_OUT（截圖與 JSON 輸出目錄，預設系統 tmp，不會寫進 repo）。
  *
+ * Part D（第 5 輪 text-first persistence）使用 scripts/e2e/synthetic-model.cjs 的「合成模型」：由 Playwright 攔截 /models 與 /ort 請求提供，
+ * 走真的 TransformersEmbedder + onnxruntime-web(WASM)，不依賴 HuggingFace；也不會放進 public/。模型沒有語意，只用來驗證流程。
+ * E2E_ONLY=text-first 只跑 Part D；E2E_ONLY=text-first-edge 只跑 Part E；E2E_ONLY=embed-failure 只跑 Part C。
+ *
  * 注意：此腳本預設「模型檔未安裝」（驗證狀態列為 UNAVAILABLE、reload 只發 1 個 HEAD /models 探測）。
  * 若已執行 npm run fetch-model，步驟 0 與 12 的 UNAVAILABLE 斷言會失敗——那是預期的，不是缺陷。
  * 頁面需帶 ?e2e=1 才會掛上唯讀的 window.__HYPERFORGE_E2E__（節點螢幕座標與 frame 計時），腳本會自動帶上。
@@ -24,11 +28,13 @@ function loadPlaywright() {
   }
 }
 const { chromium } = loadPlaywright();
+const { modelFiles, REPO, DIM } = require("./synthetic-model.cjs");
 
 /** E2E_ONLY=embed-failure 只跑「模型檔看似存在但載入失敗」那一步 */
 const ONLY = process.env.E2E_ONLY || "";
 const OUT = process.env.E2E_OUT || fs.mkdtempSync(path.join(os.tmpdir(), "hyperforge-e2e-"));
 const BASE = `${process.env.HYPERFORGE_URL || "http://localhost:3000"}/?e2e=1`;
+fs.mkdirSync(OUT, { recursive: true });
 console.log("output dir:", OUT);
 const results = [];
 const rec = (name, pass, detail) => {
@@ -105,12 +111,89 @@ async function newPage(browser, opts = {}) {
 }
 
 const snap = (page) => page.evaluate(() => window.__HYPERFORGE_E2E__.snapshot());
+// ───────────────────────── 合成模型（攔截 /models 與 /ort） ─────────────────────────
+function ortDistDir() {
+  const mod = require("module");
+  const req = mod.createRequire(path.join(process.cwd(), "package.json"));
+  const xenova = path.dirname(req.resolve("@xenova/transformers/package.json"));
+  return path.join(path.dirname(mod.createRequire(path.join(xenova, "package.json")).resolve("onnxruntime-web/package.json")), "dist");
+}
+/** state = { onnxDelayMs, gets: string[] }；onnxDelayMs 為「載入 ONNX 檔」的人為延遲（模擬模型下載慢 / embedding 很慢）。 */
+async function installSyntheticModel(page, state) {
+  const files = modelFiles();
+  const marker = `/models/${REPO}/`;
+  const ort = ortDistDir();
+  await page.route("**/models/**", async (route) => {
+    const req = route.request();
+    const rel = decodeURIComponent(new URL(req.url()).pathname).split(marker)[1];
+    const buf = rel && files[rel];
+    try {
+      if (!buf) return await route.fulfill({ status: 404, body: "not found" });
+      const type = rel.endsWith(".onnx") ? "application/octet-stream" : "application/json";
+      if (req.method() === "HEAD") return await route.fulfill({ status: 200, headers: { "content-type": type }, body: "" });
+      state.gets.push(rel);
+      if (rel.endsWith(".onnx") && state.onnxDelayMs > 0) await new Promise((r) => setTimeout(r, state.onnxDelayMs));
+      await route.fulfill({ status: 200, headers: { "content-type": type }, body: buf });
+    } catch {
+      /* 頁面已導航 / request 已被中止 */
+    }
+  });
+  await page.route("**/ort/**", async (route) => {
+    const file = path.join(ort, path.basename(new URL(route.request().url()).pathname));
+    state.gets.push(`ort:${path.basename(file)}`);
+    try {
+      if (!fs.existsSync(file)) return await route.fulfill({ status: 404, body: "not found" });
+      await route.fulfill({ status: 200, headers: { "content-type": file.endsWith(".wasm") ? "application/wasm" : "application/javascript" }, body: fs.readFileSync(file) });
+    } catch {
+      /* ignore */
+    }
+  });
+}
+/** 直接讀瀏覽器的 IndexedDB（docs / chunks / vectors 筆數；不經過 app 程式碼） */
+const idbCounts = (page) =>
+  page.evaluate(async () => {
+    const open = indexedDB.open("hyperforge");
+    const db = await new Promise((res, rej) => ((open.onsuccess = () => res(open.result)), (open.onerror = () => rej(open.error))));
+    const count = (n) => new Promise((res) => ((db.transaction(n).objectStore(n).count().onsuccess = (e) => res(e.target.result))));
+    const out = { docs: await count("docs"), chunks: await count("chunks"), vectors: await count("vectors") };
+    db.close();
+    return out;
+  });
+const idbFirstVector = (page) =>
+  page.evaluate(async () => {
+    const open = indexedDB.open("hyperforge");
+    const db = await new Promise((res, rej) => ((open.onsuccess = () => res(open.result)), (open.onerror = () => rej(open.error))));
+    const rows = await new Promise((res) => ((db.transaction("vectors").objectStore("vectors").getAll().onsuccess = (e) => res(e.target.result))));
+    db.close();
+    const v = rows[0]?.vec;
+    return v ? { length: v.length, finite: Array.from(v).every(Number.isFinite), norm: Math.hypot(...Array.from(v)) } : null;
+  });
+async function clickNodeByLabel(page, label) {
+  await page.locator('[data-testid="fit-button"]').click();
+  await waitAsleep(page);
+  const sn = await snap(page);
+  const n = sn.nodes.find((x) => x.label === label);
+  if (!n) throw new Error(`node ${label} not found`);
+  const b = await canvasBox(page);
+  await page.mouse.click(b.x + n.sx, b.y + n.sy);
+  await page.waitForFunction((id) => window.__HYPERFORGE_E2E__.snapshot().selection.includes(id), n.id);
+  return n;
+}
+const sourcePanelText = (page) => page.locator('[data-testid="source-panel"]').innerText();
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function upload(page, name, content) {
   await page.locator('input[type="file"]').setInputFiles({ name, mimeType: "text/plain", buffer: Buffer.from(content, "utf8") });
 }
+/** 等到至少 count 個 job 已結束（不是 running）。 */
 async function waitJobDone(page, count = 1) {
-  await page.waitForFunction((n) => document.querySelectorAll('[data-testid="persist-note"]').length >= n, count, { timeout: 60000 });
+  await page.waitForFunction(
+    (n) => [...document.querySelectorAll('[data-testid="job-status"]')].filter((e) => e.getAttribute("data-status") !== "running").length >= n,
+    count,
+    { timeout: 60000 },
+  );
 }
+const jobTextLine = (page, i = 0) => page.locator('[data-testid="job-text-status"]').nth(i).innerText();
 async function waitAsleep(page, ms = 90000) {
   await page.waitForFunction(() => window.__HYPERFORGE_E2E__ && window.__HYPERFORGE_E2E__.snapshot().asleep, null, { timeout: ms });
 }
@@ -153,7 +236,7 @@ async function main() {
     await waitJobDone(page, 1);
     const jobText = await page.locator("main").innerText();
     rec("1. 匯入繁中文件完成；向量化略過 → PARTIAL（不是 DONE）", /PARTIAL/.test(jobText) && /向量化略過/.test(jobText));
-    rec("1. 文字已持久化到 IndexedDB（與向量化無關）", /文字已存入 IndexedDB/.test(await page.locator('[data-testid="persist-note"]').first().innerText()));
+    rec("1. 文字已持久化到 IndexedDB（與向量化無關）", /文字：已就緒/.test(await jobTextLine(page)) && /文字已存入 IndexedDB/.test(await jobTextLine(page)));
 
     // 2. Canvas 出現中文概念
     await page.waitForFunction(() => window.__HYPERFORGE_E2E__.snapshot().nodes.length > 0);
@@ -523,18 +606,192 @@ async function main() {
     await page.goto(BASE, { waitUntil: "networkidle" });
     await page.waitForFunction(() => window.__HYPERFORGE_E2E__ !== undefined);
     await upload(page, "電纜橋架規範.txt", ZH_DOC);
-    await page.waitForFunction(
-      () => /PARTIAL|ERROR/.test(document.querySelector("main")?.innerText ?? "") && document.querySelectorAll('[data-testid="persist-note"]').length >= 1,
-      null,
-      { timeout: 60000 },
-    ).catch(() => {});
+    await waitJobDone(page, 1).catch(() => {});
     const text = await page.locator("main").innerText();
     rec("14. 向量化失敗（模型檔看似存在、載入失敗）：job 是 PARTIAL，不是 ERROR", /PARTIAL/.test(text) && !/\bERROR\b/.test(text), text.match(/(PARTIAL|ERROR)[^\n]*/)?.[0]);
     rec("14. LINK 階段如實註記「向量化失敗」且不使用假向量", /向量化失敗/.test(text) && /不使用假向量/.test(text));
     const nodes = await page.evaluate(() => window.__HYPERFORGE_E2E__.snapshot().nodes.map((n) => n.label)).catch(() => []);
     rec("14. 畫布仍有概念（電纜槽 / 橋架 / 弱電）——不是『embedding 成功才有圖』", ["電纜槽", "橋架", "弱電"].every((w) => nodes.includes(w)), nodes.length);
-    rec("14. 文字仍持久化到 IndexedDB", /文字已存入 IndexedDB/.test(await page.locator('[data-testid="persist-note"]').first().innerText().catch(() => "")));
+    rec("14. 文字仍持久化到 IndexedDB", /文字已存入 IndexedDB/.test(await jobTextLine(page).catch(() => "")));
+    const failLine = await page.locator('[data-testid="job-vector-status"]').first().innerText().catch(() => "");
+    rec("14. 顯示「文字可用 / 語意索引失敗」並提供「重新建立索引」", /語意索引：失敗/.test(failLine) && /文字已保留/.test(failLine) && (await page.locator('[data-testid="retry-indexing"]').count()) >= 1, failLine);
     await context.close();
+  }
+
+  // ───────────────────────── Part D：第 5 輪 Text-first persistence / Cancellation semantics ─────────────────────────
+  if (!ONLY || ONLY === "text-first") {
+    const state = { onnxDelayMs: 8000, gets: [] };
+    const { page, log, context } = await newPage(browser);
+    await installSyntheticModel(page, state);
+    await page.goto(BASE, { waitUntil: "networkidle" });
+    await page.waitForFunction(() => window.__HYPERFORGE_E2E__ !== undefined);
+    const vs = await page.locator('[data-testid="vector-status"]').innerText();
+    rec("D0. 合成模型就緒：狀態列 AVAILABLE（走真的 TransformersEmbedder 路徑；模型沒有語意，只驗證流程）", /AVAILABLE/.test(vs) && !/UNAVAILABLE/.test(vs), vs);
+
+    // D1：匯入 + embedding 人為延遲 → Canvas 在 embedding 完成前出現
+    const DELAY = state.onnxDelayMs;
+    const t0 = Date.now();
+    await upload(page, "電纜橋架規範.txt", ZH_DOC);
+    await page.waitForFunction(() => window.__HYPERFORGE_E2E__.snapshot().nodes.length > 0, null, { timeout: 6000 });
+    const tCanvas = Date.now() - t0;
+    const statusAtCanvas = await page.locator('[data-testid="job-status"]').first().getAttribute("data-status");
+    rec(`D1. 匯入 → Canvas 在 embedding 完成前出現（embedding 人為延遲 ${DELAY} ms；Canvas 出現於 ${tCanvas} ms，此時 job 仍是 running）`, statusAtCanvas === "running" && tCanvas < DELAY - 2000, { tCanvas, statusAtCanvas });
+    const textLine = await jobTextLine(page);
+    const vecLine = await page.locator('[data-testid="job-vector-status"]').first().innerText();
+    rec("D1. 匯入中顯示：文字：已就緒 / 語意索引：建立中", /文字：已就緒/.test(textLine) && /語意索引：建立中/.test(vecLine), { textLine, vecLine });
+    await waitAsleep(page);
+    const nodes1 = (await snap(page)).nodes.map((n) => n.label);
+    rec("D1. Canvas 已有中文概念（電纜槽 / 橋架 / 弱電）", ["電纜槽", "橋架", "弱電"].every((w) => nodes1.includes(w)), nodes1.length);
+    const db1 = await idbCounts(page);
+    rec("D1. 此刻 IndexedDB：docs=1、chunks>0、vectors=0（文字已 commit、向量尚未）", db1.docs === 1 && db1.chunks > 0 && db1.vectors === 0, db1);
+    // Canvas 可互動：點選節點、source panel 有內容（embedding 仍在進行中）
+    await clickNodeByLabel(page, "電纜槽");
+    const panel1 = await sourcePanelText(page);
+    rec("D1. embedding 進行中 Canvas 仍可互動：點選節點 → Source panel 顯示電纜槽與原文", /電纜槽/.test(panel1) && /Original text/i.test(panel1) && (await page.locator('[data-testid="graph-canvas"]').count()) === 1);
+    await page.screenshot({ path: path.join(OUT, "D1-canvas-before-embedding-done.png") });
+
+    // D2：取消 embedding
+    const tCancelStart = Date.now();
+    await page.locator('[data-testid="cancel-job"]').click();
+    await page.waitForFunction(() => document.querySelector('[data-testid="job-status"]')?.getAttribute("data-status") === "cancelled", null, { timeout: 4000 });
+    const tCancelled = Date.now() - t0;
+    rec(`D2. 取消 embedding 即時生效（取消於 ${tCancelled} ms，早於延遲 ${DELAY} ms；不必等 embedding 結束）`, tCancelled < DELAY, { tCancelled, cancelTookMs: Date.now() - tCancelStart });
+    rec("D2. 模型載入確實已開始（取消發生在 embedding 進行中，不是 embedding 之前）", state.gets.some((g) => g.endsWith(".onnx")), state.gets);
+    const label = await page.locator('[data-testid="job-status"]').first().innerText();
+    const textAfter = await jobTextLine(page);
+    const vecAfter = await page.locator('[data-testid="job-vector-status"]').first().innerText();
+    rec("D2. job = CANCELLED（不是 PARTIAL）；顯示：文字已保留 / 語意索引已取消 / 可重新建立索引", /CANCELLED/.test(label) && !/PARTIAL/.test(label) && /文字：已就緒/.test(textAfter) && /語意索引：已取消/.test(vecAfter) && /文字已保留/.test(vecAfter) && (await page.locator('[data-testid="retry-indexing"]').count()) >= 1, { label, textAfter, vecAfter });
+    const nodes2 = (await snap(page)).nodes.map((n) => n.label);
+    rec("D2. 取消後 Canvas 文件仍存在（節點未消失）", nodes2.length === nodes1.length && (await page.locator('[data-testid="doc-row"]').count()) === 1);
+    rec("D2. 取消後文件沒有被標成錯誤（文件列沒有紅色樣式）", (await page.locator('[data-testid="doc-row"] [class*="text-red"]').count()) === 0);
+    const db2 = await idbCounts(page);
+    rec("D2. 取消後 IndexedDB：docs=1、chunks 與取消前相同、vectors=0（文字不 rollback）", db2.docs === 1 && db2.chunks === db1.chunks && db2.vectors === 0, db2);
+    // 取消後底層 embedding 在背景完成：不得偷偷寫入向量
+    await sleepMs(Math.max(0, DELAY - tCancelled) + 3500);
+    const db2b = await idbCounts(page);
+    rec("D2. 放行 / 背景 embedding 完成後仍然 vectors=0（取消後不寫入）", db2b.vectors === 0 && db2b.docs === 1, db2b);
+    rec("D2. job 仍是 cancelled（沒有被背景結果改成 done / partial）", (await page.locator('[data-testid="job-status"]').first().getAttribute("data-status")) === "cancelled");
+
+    // D3：reload
+    state.gets.length = 0;
+    log.modelHeads = 0;
+    log.requests.length = 0;
+    await page.reload({ waitUntil: "networkidle" });
+    await page.waitForFunction(() => window.__HYPERFORGE_E2E__ !== undefined);
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="doc-row"]').length >= 1);
+    await page.waitForFunction(() => window.__HYPERFORGE_E2E__.snapshot().nodes.length > 0);
+    await waitAsleep(page);
+    await sleepMs(1500);
+    const docName = await page.locator('[data-testid="doc-name"]').first().innerText();
+    const nodes3 = (await snap(page)).nodes.map((n) => n.label);
+    rec("D3. reload 後文件仍存在（文件清單 + 由 IndexedDB 重建的 graph 都有）", docName === "電纜橋架規範.txt" && ["電纜槽", "橋架", "弱電"].every((w) => nodes3.includes(w)), { docName, nodes: nodes3.length });
+    const orts = log.requests.filter((r) => r.url.includes("/ort/")).length;
+    rec("D3. reload 不初始化 embedder：只有狀態探測的 4 個 HEAD /models，沒有任何 GET 模型檔、沒有載入 ORT wasm", log.modelHeads === 4 && state.gets.length === 0 && orts === 0, { heads: log.modelHeads, gets: state.gets, ort: orts });
+    const sum3 = await page.locator('[data-testid="doc-summary"]').first().innerText();
+    const idxSum3 = await page.locator('[data-testid="index-summary"]').innerText();
+    rec("D3. reload 後語意索引顯示未完成（尚未建立）且可重新建立索引", /語意索引：尚未建立/.test(sum3) && /未完成 1 份/.test(idxSum3) && (await page.locator('[data-testid="retry-indexing"]').count()) === 1, { sum3, idxSum3 });
+    rec("D3. reload 後沒有任何 job 卡片（文字與索引狀態都由 IndexedDB 推得）", (await page.locator('[data-testid="job-status"]').count()) === 0);
+    await clickNodeByLabel(page, "電纜槽");
+    const panel3 = await sourcePanelText(page);
+    const db3 = await idbCounts(page);
+    rec("D3. IndexedDB：docs / chunks 不變、vectors 仍為 0", db3.docs === db2.docs && db3.chunks === db2.chunks && db3.vectors === 0, db3);
+    await page.screenshot({ path: path.join(OUT, "D3-after-reload.png") });
+
+    // D4：Retry indexing
+    state.onnxDelayMs = 0;
+    const tRetry = Date.now();
+    await page.locator('[data-testid="retry-indexing"]').click();
+    await page.waitForFunction(() => /語意索引：已完成/.test(document.querySelector('[data-testid="doc-summary"]')?.textContent ?? ""), null, { timeout: 60000 });
+    const retryMs = Date.now() - tRetry;
+    const db4 = await idbCounts(page);
+    const vec = await idbFirstVector(page);
+    rec(`D4. 按「重新建立索引」→ 向量補寫成功（${retryMs} ms；真的 TransformersEmbedder + ORT-web WASM）：vectors = chunks`, db4.vectors === db4.chunks && db4.vectors > 0, db4);
+    rec("D4. 沒有 duplicate：docs / chunks 與 retry 前完全相同", db4.docs === db3.docs && db4.chunks === db3.chunks, { before: db3, after: db4 });
+    rec(`D4. 寫入的向量為 ${DIM} 維、有限值、已 L2 normalize`, vec && vec.length === DIM && vec.finite && Math.abs(vec.norm - 1) < 1e-3, vec);
+    rec("D4. retry 沒有重新 PARSE：沒有新增 job 卡片", (await page.locator('[data-testid="job-status"]').count()) === 0);
+    rec("D4. 這次真的載入了模型與 ORT wasm", state.gets.some((g) => g.endsWith(".onnx")) && state.gets.some((g) => g.startsWith("ort:") && g.endsWith(".wasm")), state.gets);
+    rec("D4. 完成後按鈕消失、摘要為已完成", (await page.locator('[data-testid="retry-indexing"]').count()) === 0 && /已完成 1 份/.test(await page.locator('[data-testid="index-summary"]').innerText()));
+    await clickNodeByLabel(page, "電纜槽");
+    const panel4 = await sourcePanelText(page);
+    rec("D4. Source panel 內容與取消前、reload 後完全一致（Concept / Type / Frequency / Documents / Chunks / Original text）", panel1 === panel3 && panel3 === panel4, { same13: panel1 === panel3, same34: panel3 === panel4 });
+    await page.screenshot({ path: path.join(OUT, "D4-after-retry.png") });
+
+    // D5：再次 reload → 已完成（由 DB 推得）；重新匯入同一份內容 → 不重複 embedding、不新增 docs / chunks
+    state.gets.length = 0;
+    await page.reload({ waitUntil: "networkidle" });
+    await page.waitForFunction(() => /語意索引：已完成/.test(document.querySelector('[data-testid="doc-summary"]')?.textContent ?? ""));
+    rec("D5. 再次 reload：語意索引顯示已完成（由 IndexedDB 向量筆數推得），不再提供重新建立索引", (await page.locator('[data-testid="retry-indexing"]').count()) === 0 && state.gets.length === 0, state.gets);
+    await upload(page, "電纜橋架規範.txt", ZH_DOC);
+    await waitJobDone(page, 1);
+    const db5 = await idbCounts(page);
+    rec("D5. 重新匯入同一份內容：不新增第二份 document / chunks / vectors，也不重複 embedding（沒有載入模型）", db5.docs === db4.docs && db5.chunks === db4.chunks && db5.vectors === db4.vectors && !state.gets.some((g) => g.endsWith(".onnx")), { db5, gets: state.gets });
+    rec("D5. 重新匯入的 job = DONE（文字就緒 + 語意索引完成）", (await page.locator('[data-testid="job-status"]').first().getAttribute("data-status")) === "done");
+    const bad = log.errors.concat(log.console.filter((l) => /^error:/.test(l)));
+    rec("D. 頁面沒有 pageerror / console.error", bad.length === 0, bad.slice(0, 5));
+    await context.close();
+  }
+
+  // ───────────────────────── Part E：commit 之前取消 / 文字持久化失敗（真瀏覽器） ─────────────────────────
+  if (!ONLY || ONLY === "text-first-edge") {
+    // E1：job 一出現就取消（PARSE 尚未完成）→ 不留任何資料
+    {
+      const { page, context } = await newPage(browser);
+      await page.goto(BASE, { waitUntil: "networkidle" });
+      await page.waitForFunction(() => window.__HYPERFORGE_E2E__ !== undefined);
+      await page.evaluate(() => {
+        new MutationObserver(() => {
+          const b = document.querySelector('[data-testid="cancel-job"]');
+          if (b && !window.__cancelClicked) {
+            window.__cancelClicked = true;
+            b.click(); // job 卡片一出現（PARSE 還在讀檔）就按取消
+          }
+        }).observe(document.body, { childList: true, subtree: true });
+      });
+      const big = Array.from({ length: 900000 }, (_, i) => `w${i}`).join(" "); // 約 6 MB，PARSE 需要一段時間
+      await upload(page, "big.txt", big);
+      await waitJobDone(page, 1);
+      const st = await page.locator('[data-testid="job-status"]').first().getAttribute("data-status");
+      const line = await jobTextLine(page);
+      rec("E1. 在 PARSE 進行中取消 → job = CANCELLED", st === "cancelled", st);
+      rec("E1. 顯示「文字未就緒（已取消，沒有留下任何資料）」，沒有向量索引列、沒有重新建立索引按鈕", /未就緒（已取消，沒有留下任何資料）/.test(line) && (await page.locator('[data-testid="job-vector-status"]').count()) === 0 && (await page.locator('[data-testid="retry-indexing"]').count()) === 0, line);
+      rec("E1. Canvas 沒有文件（沒有文件列、沒有節點）", (await page.locator('[data-testid="doc-row"]').count()) === 0 && (await snap(page)).nodes.length === 0);
+      const c = await idbCounts(page);
+      rec("E1. IndexedDB：docs = chunks = vectors = 0（沒有半份文件）", c.docs === 0 && c.chunks === 0 && c.vectors === 0, c);
+      await context.close();
+    }
+    // E2：文字持久化失敗（IndexedDB 寫 docs 時丟 QuotaExceededError）
+    {
+      const state = { onnxDelayMs: 0, gets: [] };
+      const { page, context } = await newPage(browser);
+      await installSyntheticModel(page, state); // 模型「可用」：藉此證明持久化失敗時刻意不做 embedding
+      await page.addInitScript(() => {
+        const orig = IDBObjectStore.prototype.add;
+        IDBObjectStore.prototype.add = function (...a) {
+          if (this.name === "docs") throw new DOMException("simulated quota exceeded", "QuotaExceededError");
+          return orig.apply(this, a);
+        };
+      });
+      await page.goto(BASE, { waitUntil: "networkidle" });
+      await page.waitForFunction(() => window.__HYPERFORGE_E2E__ !== undefined);
+      await upload(page, "電纜橋架規範.txt", ZH_DOC);
+      await waitJobDone(page, 1);
+      await page.waitForFunction(() => window.__HYPERFORGE_E2E__.snapshot().nodes.length > 0);
+      const label = await page.locator('[data-testid="job-status"]').first().innerText();
+      const line = await jobTextLine(page);
+      rec("E2. 文字持久化失敗 → job = PARTIAL（不是 DONE，也不是 ERROR）", /PARTIAL/.test(label), label);
+      rec("E2. 明確警示「尚未儲存，重新整理後可能遺失」（不靜默吞掉）", /尚未儲存，重新整理後可能遺失/.test(line) && (await page.locator('[data-testid="doc-unsaved"]').count()) === 1 && (await page.locator('[data-testid="unsaved-notice"]').count()) === 1, line);
+      const nodes = (await snap(page)).nodes.map((n) => n.label);
+      rec("E2. Canvas 仍暫時顯示該文件的概念", ["電纜槽", "橋架", "弱電"].every((w) => nodes.includes(w)), nodes.length);
+      rec("E2. 保守策略：文字沒保存 → 不做 embedding（沒有載入任何模型檔 / ORT）", state.gets.length === 0, state.gets);
+      rec("E2. 不提供「重新建立索引」（文字沒保存，不建立只有衍生資料的狀態）", (await page.locator('[data-testid="retry-indexing"]').count()) === 0);
+      const c = await idbCounts(page);
+      rec("E2. IndexedDB：docs = chunks = vectors = 0（真的沒存進去）", c.docs === 0 && c.chunks === 0 && c.vectors === 0, c);
+      await page.reload({ waitUntil: "networkidle" });
+      await page.waitForFunction(() => window.__HYPERFORGE_E2E__ !== undefined);
+      await page.waitForFunction(() => /IndexedDB 已載入 \d+ 份文字/.test(document.querySelector('[data-testid="graph-source"]')?.textContent ?? ""));
+      rec("E2. 重新整理後該文件確實消失（與警示一致，沒有假裝已保存）", (await snap(page)).nodes.length === 0 && (await page.locator('[data-testid="doc-row"]').count()) === 0);
+      await context.close();
+    }
   }
 
   await browser.close();

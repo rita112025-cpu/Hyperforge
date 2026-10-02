@@ -18,8 +18,8 @@ npm test
 
 | 階段 | 狀態 |
 | --- | --- |
-| PARSE / DECONSTRUCT / LINK | 文字類檔案與貼上文字為真實處理；token 為近似值（CJK 逐字、其餘以空白分詞）。LINK = 關鍵字 + 向量化（embedding → 單一 transaction 寫入 IndexedDB → 插入記憶體 HNSW）；向量化只在注入可用的 `Embedder` 時執行，否則略過並標 `indexed=false`、job 為 PARTIAL |
-| RECOMBINE / EVOLVE / MANIFEST | skipped / 未接入，進度條不動；job 完成時顯示 PARTIAL，不是 DONE |
+| PARSE / DECONSTRUCT / **TEXT COMMIT** / LINK | 文字類檔案與貼上文字為真實處理；token 為近似值（CJK 逐字、其餘以空白分詞）。DECONSTRUCT 完成後先做 **text commit**（持久化 docs + chunks、加入畫布），之後才 LINK = 關鍵字 + 向量化（embedding → 寫入向量 → 插入記憶體 HNSW）。向量化是可失敗、可取消、可重試的附加能力，見下方「Text-first persistence」 |
+| RECOMBINE / EVOLVE / MANIFEST | skipped / 未接入，進度條不動（只在各自的列上標「未接入」，**不**影響 job 狀態） |
 | 畫布（第 4 輪） | 概念圖譜 Canvas：只依賴文件文字，與 embedding 解耦；見下方「畫布」一節 |
 | PDF / 圖片 / 音訊 / 影片 / zip | 尚未支援，拖入會顯示錯誤 |
 | URL（YouTube / GitHub / 網頁） | 尚未支援（不發任何網路請求），顯示錯誤 |
@@ -35,13 +35,13 @@ flowchart LR
   J["import job 完成<br/>記憶體結果"] -->|docFromJobResult| G["buildGraph<br/>(純函式)"]
   D[("IndexedDB<br/>docs + chunks")] -->|"loadCorpus<br/>不初始化 embedder"| G
   G --> C["Canvas + Source panel"]
-  J -.->|"saveDocument（文字，與向量化無關）"| D
-  J -.->|"向量化（可失敗 → PARTIAL）"| V[("vectors")]
+  J -.->|"text commit（先於 embedding）"| D
+  J -.->|"向量化（可失敗 / 可取消 / 可重試）"| V[("vectors")]
 ```
 
 - **兩條來源**：剛完成的 job 直接以記憶體結果建圖（不重讀 DB）；重新整理後由 IndexedDB 的 `docs` / `chunks` 重建（只讀這兩張表，不建立 embedder）。同一份內容（SHA-256 / 相同文字）只算一次。
 - **文字先行持久化**：`saveDocument` 在向量化之前／無論成敗都寫入文字；之後若向量化成功，`VectorStore.ingest` 對同一 docId **只補寫向量**（本輪為此修改了 `index-store.ts`；舊行為是向量化成功才寫入任何資料）。
-- **向量化失敗只降級，不影響畫布**：`runPipeline` 的 LINK 階段把 `isAvailable` / `ingest` 的任何失敗（模型檔存在但載入或推論失敗等）降級為 `indexed=false`（job 為 PARTIAL，LINK 註記失敗原因，不使用假向量），文字照常進畫布與 IndexedDB；只有取消（AbortError）會往外丟。
+- **向量化失敗只降級，不影響畫布**：`runPipeline` 的 LINK 階段把 `isAvailable` / `ingest` 的任何失敗（模型檔存在但載入或推論失敗等）降級為 `vectorStatus = failed / unavailable`（job 為 PARTIAL，LINK 註記失敗原因，不使用假向量），文字照常進畫布與 IndexedDB；只有取消（AbortError）會往外丟。
 - **向量／語意狀態**只是狀態列資訊（`lib/vector/status.ts` 對同源模型檔發 HEAD，缺模型時只發 1 個請求），畫布不等待它。
 - **概念抽取**（`lib/graph/extract.ts`）：句子 → 依 Unicode script 切 run → Latin token／Han 段（以標點與停用詞切段）→ 2–3 字 n-gram → 以「重複出現的片段覆蓋最多字」選詞（DP）→ 詞頻／文件頻率評分。**中文為統計近似，非中文斷詞**；無詞典、無 NLP tokenizer。詞需在語料中至少出現 2 次，文件至少 8 個單位才納入。
 - **人名**僅為**英文啟發式（heuristic）**（連續 2–3 個首字大寫單字，或 Dr./Mr./Ms. + 姓）；非 NER、非 AI，不支援中文人名；UI 與資料模型皆標 `heuristic`。
@@ -61,7 +61,6 @@ flowchart LR
 - 人名 heuristic 會把 Title Case 片語誤判為人名，也會漏掉小寫或單一名字；誤判率未量測。
 - 句子邊界為規則式（`。！？；!?;` 與換行；`.` 僅在後接空白、前非數字且非縮寫時）。
 - `buildGraph` 在**主執行緒同步**執行，且每新增一份文件就重算整個語料（Web Worker 為後續輪次）。Node 實測：2 萬字 67 ms、20 萬字 360 ms、100 萬字（隨機漢字最壞情況）約 3.2 秒。
-- 畫布在 job **完成時**才取得該文件（記憶體結果），所以向量化較慢時（真模型約數秒，且在主執行緒）畫布也要等到向量化結束；向量化「失敗」不會讓畫布空白，但「慢」會讓它晚出現。
 - 150 節點在「適合畫面」時標籤會做防碰撞省略，放大後才會出現較多標籤。
 - 尚未實作文件（source/document）節點，也沒有刪除文件的 UI。
 
@@ -69,9 +68,47 @@ flowchart LR
 
 ```bash
 npm run build && npm start                       # 必須是正式 build
-node scripts/e2e/canvas-acceptance.cjs           # 需 Playwright；預設假設模型檔未安裝；E2E_ONLY=embed-failure 只跑「模型檔看似存在但載入失敗」那一步
+node scripts/e2e/canvas-acceptance.cjs           # 需 Playwright；Part A–C 假設模型檔未安裝；Part D / E 由 Playwright 提供合成模型。E2E_ONLY=embed-failure|text-first|text-first-edge 只跑單一部分
 npx next dev -p 3100 && node scripts/e2e/strictmode-single-loop.cjs   # 另見檔頭說明的限制
 ```
+
+## Text-first persistence / 取消語意（第 5 輪）
+
+原則：**文字是 primary data，向量是 derived data**。embedding 是否可用、是否成功、是否被取消，都不能決定文件是否存在。
+
+```mermaid
+flowchart TD
+  P[PARSE] --> D[DECONSTRUCT 完成<br/>chunks 完整]
+  D --> C{{"TEXT COMMIT POINT<br/>（commit 前最後一次檢查取消）"}}
+  C -->|"持久化 docs+chunks（同一個 Dexie transaction）<br/>加入畫布 corpus"| T["textStatus = ready"]
+  C -->|"寫入 IndexedDB 失敗"| F["textStatus = persist_failed<br/>畫布暫時顯示 + 警示；不做 embedding"]
+  T --> L[LINK / embedding（惰性取得向量庫）]
+  L -->|成功| I["vectorStatus = indexed → job DONE"]
+  L -->|"失敗 / 模型不可用"| X["failed / unavailable → job PARTIAL（文字保留）"]
+  L -->|使用者取消| Z["cancelled → job CANCELLED（文字保留）"]
+  X --> R["重新建立索引（使用者明確觸發）"]
+  Z --> R
+  R --> I
+```
+
+- **Text commit point**（`lib/pipeline/runner.ts` 的 `onTextReady`）：只在 PARSE 成功且 DECONSTRUCT 完整產生 chunks 之後呼叫，只呼叫一次；呼叫前最後一次檢查 AbortSignal，進入後取消**不 rollback**。不逐 chunk 邊解析邊寫 DB。向量庫（`getVectorStore`，初始化可能很慢）改為 commit **之後**才惰性取得。
+- **取消語意**：PARSE / DECONSTRUCT 期間或 commit 前一刻取消 → `cancelled`，DB 與畫布都沒有任何資料；commit 之後取消（含 embedding 進行中）→ 仍是 `cancelled`（**不是** `partial`），但文字保留於 IndexedDB 與畫布，UI 顯示「文字已保留 / 語意索引已取消 / 重新建立索引」。取消會立即生效（對 `getStore` / `isAvailable` / `ingest` 做 abort race）；底層推論無法中止、會在背景跑完，但取消後不會寫入向量（`ingest` 在寫入 transaction 前再檢查一次 signal）。
+- **狀態模型**（`lib/pipeline/types.ts`）：`TextStatus = pending | ready | persist_failed`；`VectorStatus = pending | indexed | failed | cancelled | unavailable`；job 狀態 `running | done | partial | cancelled | error`（`done` 即規格的 completed）。`done` ＝ 文字 ready 且向量 indexed；`partial` ＝ 非使用者原因導致附加能力沒完成；`cancelled` ＝ 使用者取消；`error` ＝ PARSE / DECONSTRUCT 失敗。
+- **文字持久化失敗**：不靜默吞掉。job 為 partial、`textStatus = persist_failed`，畫布可暫時顯示，UI 標示「尚未儲存，重新整理後可能遺失」；**保守策略：不做 embedding**（避免只有衍生資料、沒有原文），也不提供重新建立索引。
+- **重新建立索引**（Retry indexing）：只對「文字 ready 且向量尚未完成（也不在建立中）」的文件開放，只由使用者按鈕觸發。流程：IndexedDB 的 docs / chunks → embed → 補寫向量；不重新 PARSE / DECONSTRUCT，不新增 document / chunks（chunk 主鍵決定性，向量以 `bulkAdd` 寫入、已存在即視為 duplicate）。失敗則文字不變。**沒有任何自動重試**：無計時器、無背景重試、無啟動時重試、模型變可用時也不會自動重試。
+- **重新匯入同一份內容**：reuse 既有 text / chunks（SHA-256 決定性 id）；向量已存在則不重複 embedding，只有文字則補建向量。model mismatch 沿用既有規則（向量庫不可用 → `unavailable`）。
+- **重新整理後**：文字一定是 ready（能讀到就代表已 commit）；語意索引由 IndexedDB 的向量筆數推得（`loadVectorPresence` 只讀向量表主鍵、不載入向量、不初始化 embedder）——筆數 ≥ chunk 數為「已完成」，否則為「尚未建立」並可重試。重新整理前的 `failed` / `cancelled` / `unavailable` 區別不會保留（不需要區分）。
+- **原子性**：document 與其 chunks 在同一個 Dexie transaction 寫入（`saveDocument`），任何一步失敗整體 rollback；冪等（重複 commit 不增加 document / chunk 數量）。
+- **UI**：job 卡片與「Documents」清單顯示「文字：… · 語意索引：…」與「重新建立索引」；取消後仍留在畫布的文件不標成錯誤。
+
+### 第 5 輪的已知限制
+
+- embedding 仍在**主執行緒**執行（Web Worker 為後續輪次）：推論期間 UI 仍會卡頓；取消只能讓結果被丟棄，無法中止進行中的推論，背景會繼續佔用 CPU 到它結束。
+- 「重新建立索引」進行中**不可取消**，也沒有逐 chunk 進度（只有整份文件的進度回報）。
+- 重新整理後無法區分「先前是失敗 / 取消 / 模型不可用」，一律顯示「尚未建立」。
+- 已結束的 job（cancelled / partial）本身的狀態不會因為之後 retry 成功而改變（那是歷史事實）；卡片與文件清單上的「語意索引」欄顯示的是**文件目前的狀態**。
+- `done` 不代表 RECOMBINE / EVOLVE / MANIFEST 已完成（它們尚未接入，只在各列標示）。
+- 瀏覽器驗收的「向量化成功」使用**合成 ONNX 模型**（`scripts/e2e/synthetic-model.cjs`，沒有語意）走真的 `TransformersEmbedder` + onnxruntime-web；**真模型的端到端向量化仍未驗證**（此環境無法下載）。
 
 ## 向量庫（第 2 輪）
 
