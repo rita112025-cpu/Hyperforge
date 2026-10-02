@@ -156,4 +156,18 @@ describe("VectorStore", () => {
     expect(second.duplicate).toBe(true); // docs 已存在且沒有任何 chunk 需要向量
     expect(await db.docs.count()).toBe(1);
   });
+
+  it("記憶體索引已有這些 id、但 DB 的向量被清掉後重新 ingest：補寫向量不丟錯（HNSW.add 對重複 id 會丟錯，需防護）", async () => {
+    const { db, store } = fresh();
+    await store.init();
+    const i = input(text(900));
+    await store.ingest(i, () => undefined);
+    const n = await db.vectors.count();
+    expect(n).toBeGreaterThan(0);
+    await db.vectors.clear(); // 例如向量表被清除 / 損毀；docs 與 chunks 還在，記憶體索引仍保有舊 id
+    const res = await store.ingest(i, () => undefined);
+    expect(res.duplicate).toBe(false);
+    expect(await db.vectors.count()).toBe(n);
+    expect(await db.docs.count()).toBe(1);
+  });
 });

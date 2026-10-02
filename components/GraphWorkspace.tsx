@@ -3,12 +3,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ALCHEMY_BADGE, MIN_ALCHEMY_PARENTS, composeModel, defaultAlchemyName, makeAlchemyNode } from "../lib/graph/alchemy";
 import { buildGraph, dedupeDocuments } from "../lib/graph/build";
 import { GraphController, type SelectionChange } from "../lib/graph/controller";
-import { loadCorpus } from "../lib/graph/corpus";
+import { docInfoFromDb, loadCorpus, loadVectorPresence } from "../lib/graph/corpus";
 import { EXTRACT_METHOD_NOTE, PERSON_METHOD_NOTE } from "../lib/graph/extract";
 import type { GraphDocument, GraphNode } from "../lib/graph/types";
 import { useForge } from "../lib/store";
 import { getSharedDb } from "../lib/vector/shared-db";
 import { probeVectorStatus, type VectorStatus } from "../lib/vector/status";
+import DocumentList from "./DocumentList";
 import GraphCanvas, { type CanvasContextMenuEvent } from "./GraphCanvas";
 import SourcePanel from "./SourcePanel";
 
@@ -22,10 +23,9 @@ type DbState = { state: "loading" } | { state: "ok"; count: number } | { state: 
  */
 export default function GraphWorkspace() {
   const live = useForge((s) => s.docs);
-  const lastIndexed = useForge((s) => {
-    const j = s.jobs.find((x) => x.context);
-    return j?.context ? j.context.indexed : undefined;
-  });
+  const docInfo = useForge((s) => s.docInfo);
+  const retryIndexing = useForge((s) => s.retryIndexing);
+  const seedDocInfo = useForge((s) => s.seedDocInfo);
 
   const [controller] = useState(() => new GraphController());
   const [persisted, setPersisted] = useState<GraphDocument[]>([]);
@@ -50,9 +50,13 @@ export default function GraphWorkspace() {
     let off = false;
     (async () => {
       try {
-        const docs = await loadCorpus(getSharedDb());
+        const db = getSharedDb();
+        const docs = await loadCorpus(db);
+        // 語意索引是否完成：只讀向量表的主鍵（不載入向量、不建立 embedder）。讀不到時當作「尚未建立」，使用者可明確重試。
+        const presence = await loadVectorPresence(db).catch(() => new Map<string, number>());
         if (off) return;
         setPersisted(docs);
+        seedDocInfo(docInfoFromDb(docs, presence));
         setDb({ state: "ok", count: docs.length });
       } catch (e) {
         if (!off) setDb({ state: "error", message: e instanceof Error ? e.message : String(e) });
@@ -61,7 +65,7 @@ export default function GraphWorkspace() {
     return () => {
       off = true;
     };
-  }, []);
+  }, [seedDocInfo]);
 
   useEffect(() => {
     let off = false;
@@ -78,6 +82,20 @@ export default function GraphWorkspace() {
   const model = useMemo(() => composeModel(base, temps), [base, temps]);
   const docsById = useMemo(() => new Map(dedupeDocuments(allDocs).map((d) => [d.id, d])), [allDocs]);
   const nodeById = useMemo(() => new Map(model.nodes.map((n) => [n.id, n])), [model]);
+  const docList = useMemo(() => [...docsById.values()].map((d) => ({ id: d.id, name: d.name })), [docsById]);
+  const indexSummary = useMemo(() => {
+    let indexed = 0;
+    let building = 0;
+    let incomplete = 0;
+    for (const d of docList) {
+      const v = docInfo[d.id]?.vector ?? "pending";
+      if (v === "indexed") indexed++;
+      else if (v === "building") building++;
+      else incomplete++;
+    }
+    return { indexed, building, incomplete };
+  }, [docList, docInfo]);
+  const unsavedCount = useMemo(() => docList.filter((d) => docInfo[d.id]?.text === "persist_failed").length, [docList, docInfo]);
 
   useEffect(() => {
     controller.onSelectionChange = setSel;
@@ -243,6 +261,8 @@ export default function GraphWorkspace() {
         />
       </div>
 
+      <DocumentList docs={docList} docInfo={docInfo} onRetry={(id) => void retryIndexing(id)} />
+
       <div className="space-y-1 font-mono text-[11px] text-zinc-500" data-testid="graph-status">
         <div data-testid="graph-counts">
           文件 {stats.docCount} 份 · 概念 {stats.shownNodes} 個 · 連線 {stats.shownEdges} 條
@@ -273,9 +293,16 @@ export default function GraphWorkspace() {
             : vector.state === "AVAILABLE"
               ? `AVAILABLE（${vector.detail}）`
               : `UNAVAILABLE（${vector.detail}）· 不影響畫布`}
-          {lastIndexed === false && " · 最近一次匯入：向量化略過（PARTIAL）"}
-          {lastIndexed === true && " · 最近一次匯入：已向量化"}
         </div>
+        <div data-testid="index-summary">
+          語意索引：已完成 {indexSummary.indexed} 份 · 建立中 {indexSummary.building} 份 · 未完成 {indexSummary.incomplete} 份
+          {indexSummary.incomplete > 0 && "（文字都已保留；可在下方文件清單明確「重新建立索引」，不會自動重試）"}
+        </div>
+        {unsavedCount > 0 && (
+          <div className="text-amber-300" data-testid="unsaved-notice">
+            {unsavedCount} 份文件尚未儲存到 IndexedDB，重新整理後可能遺失（畫布暫時仍可顯示）
+          </div>
+        )}
         <div>
           中文概念：{EXTRACT_METHOD_NOTE}；人名：{PERSON_METHOD_NOTE}。連線 = 同一句話內共同出現（co-occurrence）。
         </div>
