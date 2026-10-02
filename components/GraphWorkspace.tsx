@@ -1,10 +1,11 @@
 "use client";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ALCHEMY_BADGE, MIN_ALCHEMY_PARENTS, composeModel, defaultAlchemyName, makeAlchemyNode } from "../lib/graph/alchemy";
 import { buildGraph, dedupeDocuments } from "../lib/graph/build";
 import { GraphController, type SelectionChange } from "../lib/graph/controller";
 import { docInfoFromDb, loadCorpus, loadVectorPresence } from "../lib/graph/corpus";
 import { EXTRACT_METHOD_NOTE, PERSON_METHOD_NOTE } from "../lib/graph/extract";
+import { clampMenuPosition } from "../lib/graph/menu-position";
 import type { GraphDocument, GraphNode } from "../lib/graph/types";
 import { useForge } from "../lib/store";
 import { getSharedDb } from "../lib/vector/shared-db";
@@ -40,6 +41,7 @@ export default function GraphWorkspace() {
   const [e2e, setE2e] = useState(false);
   const pendingSelect = useRef<string | null>(null);
   const menuEl = useRef<HTMLDivElement>(null);
+  const stageEl = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setE2e(new URLSearchParams(window.location.search).has("e2e"));
@@ -118,6 +120,16 @@ export default function GraphWorkspace() {
     }
   }, [controller, model]);
 
+  // 選單定位：用「實際量到的」選單與舞台尺寸夾在舞台內（不假設固定寬度）。layout effect 在繪製前執行，不會閃一下。
+  useLayoutEffect(() => {
+    const el = menuEl.current;
+    const stage = stageEl.current;
+    if (!menu || !el || !stage) return;
+    const p = clampMenuPosition(menu.x, menu.y, el.offsetWidth, el.offsetHeight, stage.clientWidth, stage.clientHeight);
+    el.style.left = `${p.left}px`;
+    el.style.top = `${p.top}px`;
+  }, [menu, naming]);
+
   // Esc：關閉選單 / 命名框；沒有選單時清除選取
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -180,7 +192,7 @@ export default function GraphWorkspace() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
-        <div className="relative h-[560px] overflow-hidden rounded-xl border border-white/10 bg-zinc-950" data-testid="graph-stage">
+        <div ref={stageEl} className="relative h-[560px] overflow-hidden rounded-xl border border-white/10 bg-zinc-950" data-testid="graph-stage">
           <GraphCanvas controller={controller} model={model} onContextMenu={setMenu} e2e={e2e} />
 
           {nothingToShow && (
@@ -196,7 +208,7 @@ export default function GraphWorkspace() {
               ref={menuEl}
               role="menu"
               className="absolute z-20 min-w-44 rounded-lg border border-white/15 bg-zinc-900 p-1 font-mono text-xs shadow-xl"
-              style={{ left: Math.min(menu.x, 520), top: Math.min(menu.y, 480) }}
+              style={{ left: menu.x, top: menu.y }}
               data-testid="canvas-menu"
             >
               <button

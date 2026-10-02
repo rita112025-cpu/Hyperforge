@@ -204,35 +204,54 @@ function splitAtStops(run: string, base: number): Seg[] {
   return segs;
 }
 
+/**
+ * 兩個 matchAll 各自的結果彼此不重疊、且位置遞增，所以：
+ *  - PERSON_RE 的比對只需要跟「titled 那一批」檢查重疊，並且可用雙指標線性掃過（不是對所有已收集的 span 逐一比較）；
+ *  - 回傳的順序維持「titled 在前、一般人名在後」（行為與先前相同）。
+ * 一個沒有句號、沒有換行的超長單行文字可能有數萬個人名候選，逐一比較會是 O(P²)。
+ */
 function detectPersons(sentence: string, base: number): PersonSpan[] {
-  const spans: PersonSpan[] = [];
-  const taken = (s: number, e: number) => spans.some((p) => s < p.end && p.start < e);
+  const titled: PersonSpan[] = [];
   for (const m of sentence.matchAll(TITLED_RE)) {
     const s = m.index!;
     const e = s + m[0].length;
     const name = m[1];
     if (NON_NAME_FIRST.has(name) || NON_NAME_ANY.has(name)) continue;
-    spans.push({ name, start: base + s, end: base + e });
+    titled.push({ name, start: base + s, end: base + e });
   }
+  const plain: PersonSpan[] = [];
+  let j = 0; // titled 中第一個「結束位置在目前比對起點之後」的 span
   for (const m of sentence.matchAll(PERSON_RE)) {
-    const s = m.index!;
+    const s = base + m.index!;
     const e = s + m[0].length;
-    if (taken(base + s, base + e)) continue;
+    while (j < titled.length && titled[j].end <= s) j++;
+    if (j < titled.length && titled[j].start < e) continue; // 與 titled 重疊（titled[j] 是第一個可能重疊的）
     const words = m[1].split(" ");
     if (NON_NAME_FIRST.has(words[0]) || words.some((w) => NON_NAME_ANY.has(w))) continue;
-    spans.push({ name: m[1], start: base + s, end: base + e });
+    plain.push({ name: m[1], start: s, end: e });
   }
-  return spans;
+  return [...titled, ...plain];
+}
+
+/** 依 start 遞增的 span 清單上，用單調指標判斷位置是否落在某個 span 內（呼叫端的查詢位置必須遞增）。 */
+function makeInsideSpan(spans: readonly PersonSpan[]): (pos: number) => boolean {
+  const sorted = [...spans].sort((a, b) => a.start - b.start);
+  let k = 0;
+  return (pos) => {
+    while (k < sorted.length && sorted[k].end <= pos) k++;
+    return k < sorted.length && pos >= sorted[k].start;
+  };
 }
 
 function scanSentence(text: string, base: number): SentenceScan {
   const persons = detectPersons(text, base);
+  const insidePerson = makeInsideSpan(persons); // matchAll 的位置遞增，可用單調指標，不需對每個 token 掃過全部人名
   const han: Seg[] = [];
   const latin: LatinTok[] = [];
   for (const m of text.matchAll(TOKEN_RE)) {
     const start = base + m.index!;
     if (m[1] !== undefined) han.push(...splitAtStops(m[1], start));
-    else if (!persons.some((p) => start >= p.start && start < p.end)) latin.push({ text: m[2], start, end: start + m[2].length });
+    else if (!insidePerson(start)) latin.push({ text: m[2], start, end: start + m[2].length });
   }
   return { han, latin, persons };
 }

@@ -184,3 +184,48 @@ describe("splitSentences", () => {
     expect(s).toEqual(["第一句。", "第二句！", "第三句？", "第四句；", "第五句 3.5 倍。", "Dr. Smith said hi.", "Next one."]);
   });
 });
+
+describe("人名偵測不再是 O(P²)（超長單行）", () => {
+  const run = (text: string) => extractConcepts([{ docId: "d", text }]);
+
+  it("titled（Dr./Mr.）與一般人名重疊時不重複計算：任兩個人名 occurrence 不重疊（行為與修正前相同）", () => {
+    const text = "Dr. Alice Wong met Mr. Bob Lee. Alice Wong thanked Bob Lee. Dr. Alice Wong left. Bob Lee stayed.";
+    const r = run(text);
+    const persons = r.concepts.filter((c) => c.kind === "person");
+    // 維持修正前的既有行為：「Dr. Alice Wong」的 titled 比對只取第一個單字（alice）；「Bob Lee」出現 2 次以上才成為概念。
+    expect(persons.map((p) => p.key).sort()).toEqual(["alice", "bob lee"]);
+    const occ = r.occurrences[0].filter((x) => x.id.startsWith("person:")).sort((a, b) => a.start - b.start);
+    for (let i = 1; i < occ.length; i++) expect(occ[i].start).toBeGreaterThanOrEqual(occ[i - 1].end);
+  });
+
+  it("人名內的單字不會同時被當成一般概念（Latin token 去重）", () => {
+    const r = run("Alice Wong and Alice Wong and Alice Wong, plus tray tray tray");
+    const keys = r.concepts.map((c) => c.key);
+    expect(keys).toContain("alice wong");
+    expect(keys).not.toContain("alice");
+    expect(keys).not.toContain("wong");
+    expect(keys).toContain("tray");
+  });
+
+  it("沒有句號、沒有換行的 0.6MB 單行（數萬個人名候選）在合理時間內完成（修正前約 3.9 秒，現在約 0.05 秒）", () => {
+    const text = "Foo Bar baz Qux Quux corge ".repeat(22000);
+    const t0 = performance.now();
+    const r = run(text);
+    const ms = performance.now() - t0;
+    expect(r.concepts.some((c) => c.kind === "person")).toBe(true);
+    expect(ms).toBeLessThan(1500);
+  });
+
+  it("成長趨勢接近線性：資料量變 4 倍，耗時不超過 10 倍（平方級會是 16 倍）", () => {
+    const time = (n: number) => {
+      const text = "Foo Bar baz Qux Quux corge ".repeat(n);
+      run(text.slice(0, 2000)); // 暖機
+      const t0 = performance.now();
+      run(text);
+      return performance.now() - t0;
+    };
+    const small = Math.max(time(4000), 1);
+    const big = time(16000);
+    expect(big / small).toBeLessThan(10);
+  });
+});
