@@ -143,7 +143,11 @@ export class VectorStore {
       throw e;
     }
     // 寫入成功後才動記憶體索引，避免索引與 DB 不一致
-    ids.forEach((id, i) => this.index!.add(id, vectors[i]));
+    // HNSW.add 對重複 id 會丟錯（而此時 DB 已 commit）。補寫 / 重新建立索引時，記憶體索引可能仍保有舊的同 id 向量
+    // （例如向量表曾被清除）；同一個模型下向量相同，略過即可（HNSW 沒有 replace；重新載入頁面時會由 DB 重建）。
+    ids.forEach((id, i) => {
+      if (!this.index!.has(id)) this.index!.add(id, vectors[i]);
+    });
     report(1);
     return { docId, duplicate: false };
   }

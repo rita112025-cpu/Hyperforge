@@ -7,7 +7,7 @@ import { FakeEmbedder } from "../vector/fake-embedder.test-util";
 import { VectorStore } from "../vector/index-store";
 import { createStoreGetter } from "../vector/runtime";
 import { buildGraph } from "./build";
-import { contentIdOf, docFromJobResult, loadCorpus, saveDocument } from "./corpus";
+import { contentIdOf, docFromJobResult, docInfoFromDb, loadCorpus, loadStoredDocument, loadVectorPresence, saveDocument } from "./corpus";
 
 const TEXT_A = "電纜槽淨距不足，需要調整弱電橋架位置。弱電橋架與電纜槽之間必須保留足夠間距。";
 const TEXT_B = "alpha bravo charlie. alpha bravo. charlie alpha. alpha.";
@@ -77,7 +77,7 @@ describe("reload：由 IndexedDB 重建 graph，不需要 embedder", () => {
     const store = new VectorStore(db, new FakeEmbedder(64, false));
     await store.init();
     const out = await runPipeline({ kind: "text", text: TEXT_A }, { store, onStage: () => undefined });
-    expect(out.indexed).toBe(false); // 向量功能 = PARTIAL
+    expect(out.vectorStatus).toBe("unavailable"); // 向量功能 = PARTIAL
     expect(await db.docs.count()).toBe(0); // runner 本身不寫文字；由 saveDocument 負責
     await saveDocument(db, out);
     expect([await db.docs.count(), await db.vectors.count()]).toEqual([1, 0]);
@@ -152,5 +152,84 @@ describe("文字先行持久化後補寫向量（index-store.ingest）", () => {
     const saved = await saveDocument(db, i);
     expect(saved).toEqual({ docId: res.docId, created: false });
     expect(await db.vectors.count()).toBe(i.chunks.length);
+  });
+});
+
+describe("文字 commit 的原子性與冪等（docs + chunks 同一個 transaction）", () => {
+  it("chunks 寫入失敗 → 整個 transaction rollback：docs 也不存在（不會出現「doc 已存在但 chunks 缺」）；之後重試可正常寫入", async () => {
+    const db = await freshDb();
+    const i = input("big.txt", Array.from({ length: 1300 }, (_, k) => `w${k}`).join(" "));
+    const spy = vi.spyOn(db.chunks, "bulkAdd").mockRejectedValueOnce(new Error("disk full"));
+    await expect(saveDocument(db, i)).rejects.toThrow("disk full");
+    expect([await db.docs.count(), await db.chunks.count()]).toEqual([0, 0]); // 沒有半份文件
+    spy.mockRestore();
+    const ok = await saveDocument(db, i);
+    expect(ok?.created).toBe(true);
+    expect([await db.docs.count(), await db.chunks.count()]).toEqual([1, i.chunks.length]);
+  });
+
+  it("冪等：同一份內容重複 commit，document 與 chunk 數量都不增加", async () => {
+    const db = await freshDb();
+    const i = input("big.txt", Array.from({ length: 1300 }, (_, k) => `w${k}`).join(" "));
+    for (let k = 0; k < 3; k++) await saveDocument(db, i);
+    expect([await db.docs.count(), await db.chunks.count()]).toEqual([1, i.chunks.length]);
+  });
+
+  it("並發 commit 同一份內容：只有一份 document、chunks 不重複", async () => {
+    const db = await freshDb();
+    const i = input("big.txt", Array.from({ length: 1300 }, (_, k) => `w${k}`).join(" "));
+    const results = await Promise.all([saveDocument(db, i), saveDocument(db, i), saveDocument(db, i)]);
+    expect(results.filter((r) => r?.created).length).toBe(1);
+    expect([await db.docs.count(), await db.chunks.count()]).toEqual([1, i.chunks.length]);
+  });
+});
+
+describe("loadStoredDocument / loadVectorPresence / docInfoFromDb（重新整理與 retry 用；都不需要 embedder）", () => {
+  const BIG = Array.from({ length: 1300 }, (_, k) => `w${k}`).join(" ");
+
+  it("loadStoredDocument：取回的 name / rawText / chunks 與當初 commit 的逐筆相同（retry 不需要重新 PARSE / DECONSTRUCT）", async () => {
+    const db = await freshDb();
+    const i = input("big.txt", BIG);
+    const saved = await saveDocument(db, i);
+    const back = await loadStoredDocument(db, saved!.docId);
+    expect(back).toEqual({ name: "big.txt", rawText: BIG, chunks: i.chunks });
+  });
+
+  it("loadStoredDocument：不存在的 doc 回傳 null", async () => {
+    const db = await freshDb();
+    expect(await loadStoredDocument(db, "nope")).toBeNull();
+  });
+
+  it("loadVectorPresence 只讀向量表的主鍵，不載入向量值；以 docId 彙總筆數", async () => {
+    const db = await freshDb();
+    const store = new VectorStore(db, new FakeEmbedder());
+    await store.init();
+    const a = input("a.txt", BIG);
+    const b = input("b.txt", TEXT_A);
+    await saveDocument(db, a);
+    await saveDocument(db, b); // b 只有文字
+    const resA = await store.ingest(a, () => undefined);
+    const valuesSpy = vi.spyOn(db.vectors, "toArray");
+    const presence = await loadVectorPresence(db);
+    expect(valuesSpy).not.toHaveBeenCalled(); // 沒有載入 Float32Array
+    expect(presence.get(resA.docId)).toBe(a.chunks.length);
+    expect(presence.size).toBe(1);
+    valuesSpy.mockRestore();
+  });
+
+  it("docInfoFromDb：向量筆數 ≥ chunk 數 → indexed；否則 pending（尚未建立）；文字一律 ready", async () => {
+    const db = await freshDb();
+    const store = new VectorStore(db, new FakeEmbedder());
+    await store.init();
+    const a = input("a.txt", BIG);
+    const b = input("b.txt", TEXT_A);
+    await saveDocument(db, a);
+    await saveDocument(db, b);
+    await store.ingest(a, () => undefined);
+    const docs = await loadCorpus(db);
+    const info = docInfoFromDb(docs, await loadVectorPresence(db));
+    const byName = Object.fromEntries(docs.map((d) => [d.name, info[d.id]]));
+    expect(byName["a.txt"]).toEqual({ text: "ready", vector: "indexed" });
+    expect(byName["b.txt"]).toMatchObject({ text: "ready", vector: "pending" });
   });
 });

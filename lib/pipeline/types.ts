@@ -31,25 +31,87 @@ export type IngestSource =
   | { kind: "url"; url: string; subtype: "youtube" | "github" | "web" }
   | { kind: "text"; text: string };
 
+/**
+ * 文字是 primary data，向量是 derived data。兩者各自有狀態，不要用單一 job 狀態承擔全部語意，
+ * 也不要再加 isPartial / hasText / hasVectors 之類互相矛盾的 boolean。
+ *
+ * TextStatus
+ *   pending        文字尚未 commit（PARSE / DECONSTRUCT 還沒完成，或被取消、或失敗）
+ *   ready          文字（docs + chunks）已 commit：已持久化，且畫布可用
+ *   persist_failed 文字已解析完成、已加入本次 session 的畫布，但寫入 IndexedDB 失敗（重新整理後會遺失）
+ */
+export type TextStatus = "pending" | "ready" | "persist_failed";
+
+/**
+ * VectorStatus（衍生資料；可失敗、可延後、可重試）
+ *   pending      尚未建立（進行中，或重新整理後只知道「沒有向量」）
+ *   indexed      向量已寫入
+ *   failed       向量化過程出錯（非使用者原因、非模型缺失）
+ *   cancelled    使用者取消了這次向量化
+ *   unavailable  無法向量化：模型未安裝 / 向量庫無法使用 / 文字未保存而刻意不建立向量
+ */
+export type VectorStatus = "pending" | "indexed" | "failed" | "cancelled" | "unavailable";
+
+/** 文件層級的向量狀態 = VectorStatus + 「建立中」（job 進行中，或使用者觸發的 retry 進行中） */
+export type DocVectorState = VectorStatus | "building";
+
+/** 單一文件目前的狀態（job 進行中、job 結束後、retry、以及重新整理後由 IndexedDB 推得，都統一在這裡） */
+export interface DocInfo {
+  text: TextStatus;
+  vector: DocVectorState;
+  textNote?: string;
+  vectorNote?: string;
+  /** retry 進行中的進度 0..1 */
+  progress?: number;
+}
+
+/** text commit point 交給 onTextReady 的內容：只有在 PARSE 成功且 DECONSTRUCT 完整產生 chunks 之後才會呼叫 */
+export interface TextCommitPayload {
+  name: string;
+  rawText: string;
+  chunks: Chunk[];
+}
+
+export interface TextCommitResult {
+  status: Exclude<TextStatus, "pending">;
+  /** 文件 id（內容 SHA-256） */
+  docId?: string;
+  note?: string;
+}
+
 export interface IngestContext {
   name: string;
   rawText: string;
   chunks: Chunk[];
   keywords: string[];
-  /** 已寫入向量庫的文件 id；未向量化時為 undefined */
+  /** 文件 id（內容 SHA-256）；有 text commit 或向量化時才有 */
   docId?: string;
-  /** false = 向量化被略過（例如模型未安裝），job 應視為 partial */
-  indexed: boolean;
+  textStatus: TextStatus;
+  /** runner 結束時的向量結果（取消會直接 throw AbortError，不會走到這裡） */
+  vectorStatus: VectorStatus;
 }
+
+/**
+ * job 狀態
+ *   running    進行中
+ *   done       文字已就緒 且 向量已建立（= 規格的 completed）
+ *   partial    系統完成了文字處理，但「非使用者原因」導致附加能力沒完成（向量失敗 / 不可用 / 文字未能保存）
+ *   cancelled  使用者主動取消。即使 text commit 之後才取消、文字已保留，仍是 cancelled，不是 partial
+ *   error      文字處理本身失敗（PARSE / DECONSTRUCT 出錯）
+ * RECOMBINE / EVOLVE / MANIFEST 尚未接入，只在各自的列上標示，不影響 job 狀態。
+ */
+export type JobStatus = "running" | "done" | "partial" | "error" | "cancelled";
 
 export interface IngestJob {
   id: string;
   name: string;
   stages: StageState[];
-  /** partial = 已跑完，但有階段尚未接入（skipped） */
-  status: "running" | "done" | "partial" | "error" | "cancelled";
+  status: JobStatus;
   error?: string;
   context?: IngestContext;
-  /** 文字（docs + chunks，不含向量）持久化到 IndexedDB 的結果；與向量化成敗無關 */
-  persist?: { ok: boolean; note: string };
+  textStatus: TextStatus;
+  vectorStatus: VectorStatus;
+  textNote?: string;
+  /** text commit 之後才有 */
+  docId?: string;
 }

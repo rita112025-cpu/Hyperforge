@@ -1,14 +1,30 @@
-import { deconstruct, link, parse } from "./stages";
+import { deconstruct, link, parse, throwIfAborted } from "./stages";
 import type { VectorStore } from "../vector/index-store";
-import type { IngestContext, IngestSource, StageId, StageState } from "./types";
+import type { IngestContext, IngestSource, StageId, StageState, TextCommitPayload, TextCommitResult, TextStatus, VectorStatus } from "./types";
 import { STAGE_ORDER } from "./types";
+
+export interface StoreResolution {
+  store: VectorStore | null;
+  /** store 為 null 時的原因（顯示在 LINK 的 note） */
+  reason?: string;
+}
 
 export interface RunnerHooks {
   onStage: (id: StageId, patch: Partial<StageState>) => void;
   signal?: AbortSignal;
-  /** 注入向量庫；未提供或 embedder 不可用時，LINK 只做關鍵字並標記 indexed=false */
+  /**
+   * TEXT COMMIT POINT。只在 PARSE 成功、DECONSTRUCT 完成、chunks 完整產生之後呼叫，且只呼叫一次；
+   * 此時 embedding 尚未開始。呼叫前會最後一次檢查 AbortSignal（已取消就不呼叫、不留任何資料）；
+   * 一旦進入就不再受取消影響、也不 rollback——取消只會停止後面的向量化。
+   * 回傳 persist_failed 時 runner 不會做向量化（避免只有衍生資料、沒有原文）。
+   * 沒有提供時，textStatus 維持 pending，向量化照常進行（store.ingest 自己寫 docs / chunks，僅供不關心 text commit 的呼叫端與測試）。
+   */
+  onTextReady?: (payload: TextCommitPayload) => Promise<TextCommitResult> | TextCommitResult;
+  /** 延後取得向量庫：只在 text commit 之後才呼叫，避免向量庫初始化（重建 HNSW 等）拖慢文字進入畫布 */
+  getStore?: () => Promise<StoreResolution>;
+  /** 直接注入向量庫（測試用；與 getStore 擇一） */
   store?: VectorStore;
-  /** 沒有 store 時的原因（顯示在 LINK 的 note） */
+  /** 直接注入 store 時，沒有 store 的原因 */
   storeUnavailableReason?: string;
 }
 
@@ -20,6 +36,38 @@ const SKIPPED: Record<string, string> = {
 };
 
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+const abortError = () => new DOMException("Aborted", "AbortError");
+const isAbort = (e: unknown, signal?: AbortSignal): boolean => !!signal?.aborted || (e instanceof DOMException && e.name === "AbortError");
+
+/**
+ * 讓取消「立即生效」：signal 一 abort 就以 AbortError reject，不必等底層 promise（模型下載 / 推論）結束。
+ * 底層工作無法真的被中止、會在背景繼續，但它的結果會被丟棄；store.ingest 在寫入 transaction 之前會再檢查一次 signal，
+ * 所以取消之後它不會偷偷寫入向量。
+ */
+export function raceAbort<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return work;
+  if (signal.aborted) {
+    work.catch(() => undefined);
+    return Promise.reject(abortError());
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      work.catch(() => undefined); // 取消後底層才失敗的錯誤，不要變成 unhandled rejection
+      reject(abortError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (v) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(v);
+      },
+      (e) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(e);
+      },
+    );
+  });
+}
 
 export function initialStages(): StageState[] {
   return STAGE_ORDER.map((id) => ({ id, status: id in SKIPPED ? "skipped" : "idle", progress: 0, note: SKIPPED[id] }));
@@ -36,53 +84,94 @@ export async function runPipeline(source: IngestSource, hooks: RunnerHooks): Pro
         last = next;
         if (!signal?.aborted) hooks.onStage(id, { progress: next, ...(note !== undefined ? { note } : {}) });
       });
-      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      if (signal?.aborted) throw abortError();
       hooks.onStage(id, { status: "done", progress: 1 });
       return out;
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") hooks.onStage(id, { status: "cancelled" });
-      else hooks.onStage(id, { status: "error", note: e instanceof Error ? e.message : String(e) });
+      else hooks.onStage(id, { status: "error", note: errMsg(e) });
       throw e;
     }
   };
 
   const { name, rawText } = await step("PARSE", (r) => parse(source, r, signal));
   const chunks = await step("DECONSTRUCT", (r) => deconstruct(rawText, r, signal));
-  let docId: string | undefined;
-  let indexed = false;
+
+  // ───────────── TEXT COMMIT POINT ─────────────
+  // 文字是 primary data：PARSE 成功 + DECONSTRUCT 完成 + chunks 完整之後，先 commit 文字（持久化 + 加入畫布），
+  // 再開始 LINK / embedding。向量是 derived data，之後成功、失敗或被取消都不影響已 commit 的文字。
+  let text: { status: TextStatus; docId?: string; note?: string } = { status: "pending" };
+  if (chunks.length > 0 && hooks.onTextReady) {
+    throwIfAborted(signal); // 進入 commit 前最後一次檢查；通過後就不 rollback
+    try {
+      const res = await hooks.onTextReady({ name, rawText, chunks });
+      text = { status: res.status, docId: res.docId, note: res.note };
+    } catch (e) {
+      // hook 自己出錯 = 無法確認文字已保存，保守視為 persist_failed（並因此不做向量化）
+      console.error("[hyperforge] text commit 失敗：", e);
+      text = { status: "persist_failed", note: `文字 commit 失敗：${errMsg(e)}` };
+    }
+  }
+
+  let vectorStatus: VectorStatus = "unavailable";
+  let ingestDocId: string | undefined;
   const keywords = await step("LINK", async (r) => {
-    const store = hooks.store;
-    // 向量化是「附加能力」：isAvailable / ingest 任何失敗都只降級為 indexed=false（job 走 PARTIAL），
-    // 文字（rawText / chunks）照常交回，畫布與文字持久化不能因為 embedding 失敗而拿不到資料。
-    // 取消（AbortError，或取消之後才丟出的任何錯誤）仍照舊往外丟。
+    const kw = await link(chunks, (p) => r(p * 0.2), signal); // 取消會在這裡（逐 chunk）被觀察到：commit 之後取消 → 文字保留
+    if (chunks.length === 0) {
+      r(1, "沒有可處理的文字，略過向量化");
+      return kw;
+    }
+    if (text.status === "persist_failed") {
+      r(1, `文字未能保存，略過向量化（避免只有衍生資料、沒有原文）。${text.note ?? ""}`);
+      return kw;
+    }
+
+    // 向量庫在 text commit 之後才惰性取得（init 可能很慢）；可被取消。
+    let store = hooks.store;
+    let reason = hooks.storeUnavailableReason;
+    if (hooks.getStore) {
+      try {
+        const res = await raceAbort(hooks.getStore(), signal);
+        store = res.store ?? undefined;
+        reason = res.reason;
+      } catch (e) {
+        if (isAbort(e, signal)) throw abortError();
+        console.error("[hyperforge] 取得向量庫失敗，略過向量化：", e);
+        store = undefined;
+        reason = `向量庫初始化失敗：${errMsg(e)}`;
+      }
+    }
+
+    // 向量化是「附加能力」：任何失敗都只降級（vectorStatus = failed / unavailable，job 走 PARTIAL），
+    // 文字照常交回；只有取消（AbortError）會往外丟。
     let canEmbed = false;
     let probeError: unknown;
     if (store) {
       try {
-        canEmbed = await store.isAvailable();
+        canEmbed = await raceAbort(store.isAvailable(), signal);
       } catch (e) {
+        if (isAbort(e, signal)) throw abortError();
         probeError = e;
       }
     }
-    // 有向量化：關鍵字佔前 20%，向量化佔後 80%
-    const kw = await link(chunks, (p) => r(canEmbed ? p * 0.2 : p), signal);
     if (!store || !canEmbed) {
-      const why = probeError ? `向量化可用性檢查失敗：${errMsg(probeError)}` : (hooks.storeUnavailableReason ?? "模型未安裝");
+      const why = probeError ? `向量化可用性檢查失敗：${errMsg(probeError)}` : (reason ?? "模型未安裝");
       if (probeError) console.error("[hyperforge] 向量化可用性檢查失敗，略過向量化：", probeError);
-      r(1, `向量化略過：${why}（不使用假向量）`);
+      r(1, `向量化略過：${why}（不使用假向量；文字已保留）`);
       return kw;
     }
     try {
-      const res = await store.ingest({ name, rawText, chunks }, (p) => r(0.2 + p * 0.8, `向量化 ${Math.round(p * 100)}%`), signal);
-      docId = res.docId;
-      indexed = true;
-      if (res.duplicate) r(1, "內容已存在，未重複寫入");
+      const res = await raceAbort(store.ingest({ name, rawText, chunks }, (p) => r(0.2 + p * 0.8, `向量化 ${Math.round(p * 100)}%`), signal), signal);
+      ingestDocId = res.docId;
+      vectorStatus = "indexed";
+      if (res.duplicate) r(1, "向量已存在，未重複建立");
     } catch (e) {
-      if (signal?.aborted || (e instanceof DOMException && e.name === "AbortError")) throw new DOMException("Aborted", "AbortError");
-      console.error("[hyperforge] 向量化失敗，略過（文字仍會進入畫布）：", e);
-      r(1, `向量化失敗：${errMsg(e)}（不使用假向量；文字仍會進入畫布）`);
+      if (isAbort(e, signal)) throw abortError();
+      vectorStatus = "failed";
+      console.error("[hyperforge] 向量化失敗，略過（文字已保留）：", e);
+      r(1, `向量化失敗：${errMsg(e)}（不使用假向量；文字已保留）`);
     }
     return kw;
   });
-  return { name, rawText, chunks, keywords, docId, indexed };
+  return { name, rawText, chunks, keywords, docId: text.docId ?? ingestDocId, textStatus: text.status, vectorStatus };
 }

@@ -1,4 +1,5 @@
 import type { Chunk } from "../pipeline/chunker";
+import type { DocInfo } from "../pipeline/types";
 import type { HyperforgeDB } from "../vector/db";
 import { sha256Hex } from "../vector/hash";
 import { hash53 } from "./seed";
@@ -91,4 +92,48 @@ export async function loadCorpus(db: HyperforgeDB): Promise<GraphDocument[]> {
       cs.sort((a, b) => a.index - b.index);
       return [{ id: d.id, name: d.name, rawText: d.rawText, chunks: cs } satisfies GraphDocument];
     });
+}
+
+/**
+ * 每份文件目前已有幾筆向量（docId → 筆數）。只讀向量表的「主鍵」（`docId:index`），不載入向量本身，
+ * 不需要 embedder，也不需要 VectorStore.init()；重新整理後用它判斷「語意索引是否已完成」。
+ */
+export async function loadVectorPresence(db: HyperforgeDB): Promise<Map<string, number>> {
+  const keys = (await db.vectors.toCollection().primaryKeys()) as string[];
+  const counts = new Map<string, number>();
+  for (const k of keys) {
+    const docId = k.slice(0, k.lastIndexOf(":"));
+    counts.set(docId, (counts.get(docId) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * 重新整理後，由 IndexedDB 推得每份文件的狀態：文字一定是 ready（能讀到就代表已 commit）；
+ * 向量筆數 ≥ chunk 數 → indexed，否則 pending（「尚未建立」；先前是失敗 / 取消 / 不可用，重新整理後無從得知，也不需要區分）。
+ */
+export function docInfoFromDb(docs: GraphDocument[], presence: ReadonlyMap<string, number>): Record<string, DocInfo> {
+  const out: Record<string, DocInfo> = {};
+  for (const d of docs) {
+    const indexed = d.chunks.length > 0 && (presence.get(d.id) ?? 0) >= d.chunks.length;
+    out[d.id] = { text: "ready", vector: indexed ? "indexed" : "pending", ...(indexed ? {} : { vectorNote: "尚未建立語意索引" }) };
+  }
+  return out;
+}
+
+/**
+ * 由 IndexedDB 重新取回已 commit 的文字（name / rawText / chunks），供「重新建立索引」使用：
+ * 不重新 PARSE 原始檔、不重新 DECONSTRUCT，chunk 邊界與原本完全相同（因此 chunk id 不變、不會產生重複）。
+ */
+export async function loadStoredDocument(db: HyperforgeDB, docId: string): Promise<{ name: string; rawText: string; chunks: Chunk[] } | null> {
+  const doc = await db.docs.get(docId);
+  if (!doc) return null;
+  const rows = await db.chunks.where("docId").equals(docId).toArray();
+  if (!rows.length) return null;
+  rows.sort((a, b) => a.index - b.index);
+  return {
+    name: doc.name,
+    rawText: doc.rawText,
+    chunks: rows.map((r) => ({ index: r.index, text: doc.rawText.slice(r.start, r.end), start: r.start, end: r.end, tokenCount: r.tokenCount })),
+  };
 }
