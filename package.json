@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:hf": "cross-env HYPERFORGE_TARGET=hf next build && node scripts/prepare-hf-export.mjs",
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -24,6 +25,7 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "autoprefixer": "^10.4.20",
+    "cross-env": "^7.0.3",
     "fake-indexeddb": "^6.2.5",
     "postcss": "^8.4.47",
     "tailwindcss": "~3.4.14",

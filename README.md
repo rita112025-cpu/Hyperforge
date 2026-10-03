@@ -26,6 +26,27 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\create-desktop
 
 已執行的 HyperForge 會直接開啟瀏覽器；port 3000 被其他程式占用時會顯示錯誤與可取得的 PID，不會關閉該程式或更換 port。啟動失敗時視窗會保留錯誤，伺服器輸出位於 `.logs\hyperforge-dev.log`。啟動器結束後，開發伺服器仍在背景執行；需要停止時，可在工作管理員確認本專案的程序後自行結束。
 
+## Hugging Face Static Space
+
+GitHub `main` 是唯一原始碼來源；Windows 本地與 [HF 展示版](https://huggingface.co/spaces/rita112025/HyperForge) 使用同一份程式碼。只有 `build:hf` 設定 `HYPERFORGE_TARGET=hf` 並啟用 Next.js static export，本地 `dev`、`build`、`start` 維持原有模式。建置與 dev 共用 `.next/`，請先停止 dev server 再建置；HF 建置後若要使用 `next start`，需先重新執行本地 `npm run build`。
+
+依賴安裝完成且 `public/models`、`public/ort` 的既有模型與 WASM 齊全後：
+
+```bash
+npm run build:hf
+python -m http.server 4173 --bind 127.0.0.1 --directory out
+```
+
+開啟 `http://localhost:4173` 驗證完整 embedding 流程；`out/index.html`、`out/_next/`、`out/models/`、`out/ort/` 是部署資產。建置會檢查多語言 MiniLM 與 WASM 是否存在，並只從 `out/` 移除未使用的英文 `all-MiniLM-L6-v2`，本地原檔不變，也不會下載模型。不要部署 `.next`、`node_modules`、`.git` 或 log。
+
+HF 專用 metadata 位於 [deploy/hf/README.md](deploy/hf/README.md)。部署時，從 GitHub 相同 revision 產生 Space 的 source snapshot，以此檔替換 Space 根目錄 README，保留相同 `package-lock.json`，另附未入 Git 版控的既有多語言模型與 WASM。使用 Node.js 20 或 22、`npm ci`；HF metadata 指定 `app_build_command: npm run build:hf` 與 `app_file: out/index.html`。不要在 Space 手動維護另一份 app 原始碼。Static Space 的建置機 Node 版本仍需在實際部署時檢查；本地通過不代表 HF build job 已通過。
+
+也可預先建置後把完整 `out/` 放入 Space 根目錄的 `out/`：Space README 保留 `sdk: static`、`app_file: out/index.html`，移除 `app_build_command`，因為這種方式不在 HF 重建。兩種方式都不把 build artifact 加入 GitHub 主 repo。HF 的設定與 build step 依照 [官方 Static Spaces 文件](https://huggingface.co/docs/hub/spaces-sdks-static)。
+
+真模型瀏覽器驗收腳本是 `scripts/e2e/hf-static-acceptance.cjs`，在 static server 執行時以 Node 呼叫。需可載入的 Playwright；`PLAYWRIGHT_MODULE` 可指向外部 Playwright / playwright-core 安裝，`BROWSER_EXECUTABLE` 可指定既有 Chrome。結果預設寫入系統暫存目錄，也可用 `E2E_OUT` 指定。腳本使用隔離瀏覽器資料、真 MiniLM、真 WASM，檢查 Worker、IndexedDB、reload 與外連，不使用 synthetic ONNX。
+
+兩種模式都保留 `allowRemoteModels = false`，從自己的 origin 載入 `/models/` 與 `/ort/`；沒有後端推論或 GPU 需求。IndexedDB 依 origin 分開，不會自動同步本地與 HF 資料。本地 server 啟動且依賴與模型齊全時可不連外使用；HF 初次載入需要網路，目前沒有 service worker，不能承諾完整 PWA 離線快取。
+
 ## 目前狀態
 
 | 階段 | 狀態 |
