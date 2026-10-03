@@ -3,6 +3,7 @@ import { SCHEMA_VERSION, type ChunkRow, type EmbedMeta, type HyperforgeDB } from
 import type { Embedder } from "./embedder";
 import { sha256Hex } from "./hash";
 import { HNSW } from "./hnsw";
+import { loadIndex, saveIndex } from "./hnsw-persist";
 
 export class ModelMismatchError extends Error {
   constructor(public stored: EmbedMeta, public current: EmbedMeta) {
@@ -76,11 +77,18 @@ export class VectorStore {
         { key: "schemaVersion", value: SCHEMA_VERSION },
       ]);
     }
+    // 先嘗試載入持久化的索引（id 集合與 vectors 表一致才採用），否則由 vectors 表重建
+    const persisted = await loadIndex(this.db, current);
+    if (persisted) {
+      this.index = persisted;
+      return;
+    }
     const index = new HNSW({ dim: current.dim });
     const rows = await this.db.vectors.toArray();
     rows.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)); // 重建順序決定性
     for (const r of rows) index.add(r.id, r.vec);
     this.index = index;
+    if (rows.length > 0) await saveIndex(this.db, index, current);
   }
 
   /**
@@ -148,6 +156,7 @@ export class VectorStore {
     ids.forEach((id, i) => {
       if (!this.index!.has(id)) this.index!.add(id, vectors[i]);
     });
+    await saveIndex(this.db, this.index!, { model: this.embedder.id, dim: this.embedder.dim });
     report(1);
     return { docId, duplicate: false };
   }

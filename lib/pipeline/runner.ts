@@ -1,5 +1,5 @@
 import { MAX_EMBED_CHUNKS, embedLimitNote, exceedsEmbedLimit } from "./limits";
-import { deconstruct, link, parse, throwIfAborted } from "./stages";
+import { deconstruct, link, parse, throwIfAborted, type Chunker } from "./stages";
 import type { VectorStore } from "../vector/index-store";
 import type { IngestContext, IngestSource, StageId, StageState, TextCommitPayload, TextCommitResult, TextStatus, VectorStatus } from "./types";
 import { STAGE_ORDER } from "./types";
@@ -25,6 +25,8 @@ export interface RunnerHooks {
   getStore?: () => Promise<StoreResolution>;
   /** 超過這個 chunk 數就略過向量化（文字與圖譜不受影響）。預設 MAX_EMBED_CHUNKS；測試可調高。 */
   maxEmbedChunks?: number;
+  /** DECONSTRUCT 的切 chunk 實作（例如 Worker 版）。沒有提供時在呼叫端執行緒同步切。 */
+  chunker?: Chunker;
   /** 直接注入向量庫（測試用；與 getStore 擇一） */
   store?: VectorStore;
   /** 直接注入 store 時，沒有 store 的原因 */
@@ -98,7 +100,7 @@ export async function runPipeline(source: IngestSource, hooks: RunnerHooks): Pro
   };
 
   const { name, rawText } = await step("PARSE", (r) => parse(source, r, signal));
-  const chunks = await step("DECONSTRUCT", (r) => deconstruct(rawText, r, signal));
+  const chunks = await step("DECONSTRUCT", (r) => deconstruct(rawText, r, signal, hooks.chunker));
 
   // ───────────── TEXT COMMIT POINT ─────────────
   // 文字是 primary data：PARSE 成功 + DECONSTRUCT 完成 + chunks 完整之後，先 commit 文字（持久化 + 加入畫布），

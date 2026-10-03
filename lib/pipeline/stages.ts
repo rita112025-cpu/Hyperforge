@@ -56,10 +56,13 @@ export async function parse(
   return { name: file.name, rawText: text };
 }
 
+/** 切 chunk 的實作：預設同步（純函式 chunkText）；產品路徑可注入 Worker 版（lib/pipeline/deconstruct-client.ts）。 */
+export type Chunker = (rawText: string, signal?: AbortSignal) => Promise<Chunk[]>;
+
 /** DECONSTRUCT：切 chunk（純函式 chunkText，保留 rawText 位移），讓出主執行緒並回報進度。 */
-export async function deconstruct(rawText: string, report: Report, signal?: AbortSignal): Promise<Chunk[]> {
+export async function deconstruct(rawText: string, report: Report, signal?: AbortSignal, chunker?: Chunker): Promise<Chunk[]> {
   throwIfAborted(signal);
-  const chunks = chunkText(rawText);
+  const chunks = chunker ? await chunker(rawText, signal) : chunkText(rawText);
   // chunkText 是同步純函式，無逐塊進度；完成後一次回報 100%
   report(1, `${chunks.length} chunks（token 為近似值）`);
   await new Promise((r) => setTimeout(r, 0));
