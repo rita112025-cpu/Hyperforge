@@ -101,3 +101,62 @@ export function downloadText(filename: string, text: string, mime: string, deps:
   }
   return name;
 }
+
+/** 下載二進位內容（例如 PNG）。檔名經 safeFilename 淨化，Blob URL 用完即 revoke。 */
+export function downloadBlob(filename: string, blob: Blob, deps: DownloadDeps = defaultDownloadDeps()): string {
+  const ext = filename.match(/\.[^.]*$/)?.[0] ?? "";
+  const name = safeFilename(filename.replace(/\.[^.]*$/, "")) + ext;
+  const url = deps.createObjectURL(blob);
+  try {
+    deps.click(url, name);
+  } finally {
+    deps.revokeObjectURL(url);
+  }
+  return name;
+}
+
+/** canvas.toBlob 的最小形狀（可注入）；回傳 null 代表產生失敗（記憶體不足、畫布過大…） */
+export interface BlobCanvas {
+  toBlob(cb: (b: Blob | null) => void, type?: string): void;
+}
+
+export function toPngBlob(canvas: BlobCanvas | null): Promise<Blob | null> {
+  return new Promise((resolve) => {
+    if (!canvas) return resolve(null);
+    try {
+      canvas.toBlob((b) => resolve(b), "image/png");
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+export interface CopyImageDeps {
+  /** ClipboardItem 建構子與 clipboard.write；任一不存在就視為不支援 */
+  ClipboardItemCtor?: new (items: Record<string, Blob | Promise<Blob>>) => unknown;
+  write?: (items: unknown[]) => Promise<void>;
+}
+
+export type CopyImageResult = { ok: true } | { ok: false; error: string };
+
+export function defaultCopyImageDeps(): CopyImageDeps {
+  if (typeof navigator === "undefined") return {};
+  return {
+    ClipboardItemCtor: typeof ClipboardItem === "undefined" ? undefined : (ClipboardItem as unknown as CopyImageDeps["ClipboardItemCtor"]),
+    write: navigator.clipboard?.write ? (items) => navigator.clipboard.write(items as ClipboardItem[]) : undefined,
+  };
+}
+
+/**
+ * 複製圖片到剪貼簿。Safari 要求 ClipboardItem 的值是 Promise<Blob>（且需要使用者手勢），所以一律以 Promise 傳入；
+ * 不支援或被拒絕時回傳原因，由呼叫端退回下載。
+ */
+export async function copyImage(blob: Blob, deps: CopyImageDeps = defaultCopyImageDeps()): Promise<CopyImageResult> {
+  if (!deps.ClipboardItemCtor || !deps.write) return { ok: false, error: "此環境不支援複製圖片" };
+  try {
+    await deps.write([new deps.ClipboardItemCtor({ [blob.type || "image/png"]: Promise.resolve(blob) })]);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message.replace(/[。.]+$/, "") : String(e) };
+  }
+}

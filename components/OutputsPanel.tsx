@@ -6,14 +6,16 @@ import { copyText, downloadText } from "../lib/outputs/export";
 import { buildMindmap, mindmapToMarkdown } from "../lib/outputs/mindmap";
 import { buildNotionExport, notionToJson } from "../lib/outputs/notion";
 import { buildSlides, slidesToMarkdown } from "../lib/outputs/slides";
+import { buildSocratic, socraticToMarkdown } from "../lib/outputs/socratic";
 import { THREADS_LAYOUTS, buildThreads, threadsToText, type ThreadsLayout } from "../lib/outputs/threads";
 import { buildSummary, summaryToMarkdown } from "../lib/outputs/summary";
 import MindmapView from "./MindmapView";
-import { SlidesView, ThreadsView } from "./OutputViews";
+import { SlidesView, SocraticView, ThreadsView } from "./OutputViews";
+import QuoteCardView from "./QuoteCardView";
 import SegmentLine from "./SegmentLine";
 
 /**
- * 一鍵七變（右側工廠）。已實作：核心摘要、心智圖、Threads、簡報大綱、Notion JSON。其餘分頁顯示為尚未實作（不假裝存在）。
+ * 一鍵七變（右側工廠）。七個分頁皆已實作：核心摘要、心智圖、Threads、簡報大綱、Notion JSON、反問提示、金句卡。
  * 全部是本地、決定性的「抽取＋模板」輸出，不是 AI；使用者原文只以 React 文字節點顯示
  * （本檔不得使用 innerHTML / dangerouslySetInnerHTML，也不引入 markdown→HTML 套件）。
  * 資料基礎：與畫布同一份 docs 與 graph（同一次 render 傳入、useMemo 以它們為 key），所以不會顯示過期內容。
@@ -26,8 +28,8 @@ const TABS: Array<{ id: TabId; label: string; ready: boolean; stage?: string }> 
   { id: "threads", label: "Threads", ready: true },
   { id: "slides", label: "簡報大綱", ready: true },
   { id: "notion", label: "Notion", ready: true },
-  { id: "socratic", label: "反問提示", ready: false, stage: "階段 C" },
-  { id: "quotecard", label: "金句卡", ready: false, stage: "階段 C" },
+  { id: "socratic", label: "反問提示", ready: true },
+  { id: "quotecard", label: "金句卡", ready: true },
 ];
 
 const PREVIEW_CHARS = 4000;
@@ -57,6 +59,8 @@ export default function OutputsPanel({ docs, graph }: OutputsPanelProps) {
   // 每個分頁只在被選取時才算（B 階段新增的三個也一樣）
   const mindmap = useMemo(() => (digest && tab === "mindmap" ? buildMindmap(digest) : null), [digest, tab]);
   const mindmapMd = useMemo(() => (mindmap ? mindmapToMarkdown(mindmap) : ""), [mindmap]);
+  const socratic = useMemo(() => (digest && tab === "socratic" ? buildSocratic(digest) : null), [digest, tab]);
+  const socraticMd = useMemo(() => (socratic ? socraticToMarkdown(socratic) : ""), [socratic]);
   const slides = useMemo(() => (digest && tab === "slides" ? buildSlides(digest) : null), [digest, tab]);
   const slidesMd = useMemo(() => (slides ? slidesToMarkdown(slides) : ""), [slides]);
   const [layout, setLayout] = useState<ThreadsLayout>("professional");
@@ -64,7 +68,7 @@ export default function OutputsPanel({ docs, graph }: OutputsPanelProps) {
   const threadsText = useMemo(() => (threads ? threadsToText(threads) : ""), [threads]);
   const current = TABS.find((t) => t.id === tab)!;
   // 複製與下載：Markdown 輸出（摘要、簡報）是跳脫後的 Markdown；Notion 是 JSON；Threads 是「純文字」（貼到 Threads，不跳脫）
-  const text = tab === "summary" ? summaryMd : tab === "notion" ? notionJson : tab === "slides" ? slidesMd : tab === "threads" ? threadsText : tab === "mindmap" ? mindmapMd : "";
+  const text = tab === "summary" ? summaryMd : tab === "notion" ? notionJson : tab === "slides" ? slidesMd : tab === "threads" ? threadsText : tab === "mindmap" ? mindmapMd : tab === "socratic" ? socraticMd : "";
   const fileInfo: { name: string; mime: string; ext: string } | null =
     tab === "notion"
       ? { name: "hyperforge-notion.json", mime: "application/json", ext: ".json" }
@@ -76,7 +80,9 @@ export default function OutputsPanel({ docs, graph }: OutputsPanelProps) {
             ? { name: "hyperforge-threads.txt", mime: "text/plain", ext: ".txt" }
             : tab === "mindmap"
               ? { name: "hyperforge-mindmap.md", mime: "text/markdown", ext: ".md" }
-              : null;
+              : tab === "socratic"
+                ? { name: "hyperforge-socratic.md", mime: "text/markdown", ext: ".md" }
+                : null;
 
   // 退路文字區顯示後自動全選（在 commit 之後才有 ref），使用者按 Ctrl+C 即可
   useEffect(() => {
@@ -150,6 +156,7 @@ export default function OutputsPanel({ docs, graph }: OutputsPanelProps) {
         </div>
       ) : (
         <>
+          {tab !== "quotecard" && (
           <div className="flex flex-wrap items-center gap-2 text-xs">
             <button className="rounded border border-neon-cyan px-2 py-0.5 text-neon-cyan hover:bg-cyan-400/10" onClick={doCopy} data-testid="output-copy">
               複製
@@ -163,6 +170,7 @@ export default function OutputsPanel({ docs, graph }: OutputsPanelProps) {
               </span>
             )}
           </div>
+          )}
 
           {fallback !== null && (
             <textarea
@@ -209,6 +217,10 @@ export default function OutputsPanel({ docs, graph }: OutputsPanelProps) {
           {tab === "mindmap" && mindmap && digest && <MindmapView mindmap={mindmap} digest={digest} />}
 
           {tab === "slides" && slides && <SlidesView result={slides} />}
+
+          {tab === "socratic" && socratic && <SocraticView result={socratic} />}
+
+          {tab === "quotecard" && digest && <QuoteCardView digest={digest} />}
 
           {tab === "threads" && threads && (
             <div className="space-y-2">

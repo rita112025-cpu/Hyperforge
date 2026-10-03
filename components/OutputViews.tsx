@@ -1,4 +1,5 @@
 import type { SlidesResult } from "../lib/outputs/slides";
+import { SOCRATIC_TITLE, type SocraticResult } from "../lib/outputs/socratic";
 import type { ThreadsResult } from "../lib/outputs/threads";
 import { THREADS_MAX_CHARS } from "../lib/outputs/threads";
 import { segmentsToText } from "../lib/outputs/segments";
@@ -21,6 +22,7 @@ export function SlidesView({ result }: { result: SlidesResult }) {
           {s.notes.length > 0 && (
             <div className="mt-1 border-t border-white/5 pt-1" data-testid="slide-notes">
               <div className="text-[10px] uppercase tracking-wider text-zinc-500">講稿</div>
+              {s.notesLabel && <SegmentLine segments={s.notesLabel} />}
               {s.notes.map((n, j) => (
                 <SegmentLine key={j} segments={n} />
               ))}
@@ -53,6 +55,28 @@ export function ThreadsView({ result }: { result: ThreadsResult }) {
       })}
       {result.notes.map((n, i) => (
         <div key={i} className="text-[10px] text-amber-300/80" data-testid="threads-note">
+          {n}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function SocraticView({ result }: { result: SocraticResult }) {
+  return (
+    <div className="space-y-3 text-xs text-zinc-200" data-testid="output-socratic">
+      <div className="text-[10px] text-zinc-500" data-testid="socratic-explain">
+        {SOCRATIC_TITLE}：只對原文中含強斷言線索（必須／一定／所有／只有／always／never／only…）的句子，引用原文並附上固定問句。這是關鍵字比對，會有誤判；問句不新增任何斷言，也不是論證。對規範／需求書的條文（「必須」「不得」「禁止」是條文用語，不是論點），反問只是「請對照出處」，不是在說條文有問題。
+      </div>
+      {result.items.map((it, i) => (
+        <section key={i} className="space-y-1 rounded border border-white/10 bg-black/20 p-2" data-testid="socratic-item">
+          {it.lines.map((l, j) => (
+            <SegmentLine key={j} segments={l} />
+          ))}
+        </section>
+      ))}
+      {result.notes.map((n, i) => (
+        <div key={i} className="text-[10px] text-amber-300/80" data-testid="socratic-note">
           {n}
         </div>
       ))}

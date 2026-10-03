@@ -16,6 +16,8 @@ export interface Slide {
   bullets: Segment[][];
   /** 講稿：每行是一句引文 */
   notes: Segment[][];
+  /** 講稿的中性標籤（封面與重點概念頁：這些是全文多樣性最高的引文，不是摘要） */
+  notesLabel?: Segment[];
 }
 
 export interface SlidesResult {
@@ -42,6 +44,7 @@ export function buildSlides(d: Digest): SlidesResult {
     title: [f("封面")],
     bullets: d.docs.slice(0, 5).map((doc) => [f("- "), { kind: "ref", docId: doc.id, text: doc.name } as Segment]),
     notes: selectDiverse(d, 2).map(quoteLine),
+    notesLabel: [f("代表性引文：")],
   });
 
   // 2. 重點概念：前 6 個概念（term）
@@ -49,6 +52,7 @@ export function buildSlides(d: Digest): SlidesResult {
     title: [f("重點概念")],
     bullets: d.concepts.slice(0, 6).map((c) => [f("- "), { kind: "term", text: c.label } as Segment]),
     notes: selectDiverse(d, 3).map(quoteLine),
+    notesLabel: [f("代表性引文：")],
   });
 
   // 3–9. 每個重點概念一頁（只收有可引用句子的概念）：條列 ≤2 句，講稿 ≤3 句
@@ -76,7 +80,8 @@ export function buildSlides(d: Digest): SlidesResult {
   if (edges.length) {
     slides.push({
       title: [f("概念關聯")],
-      bullets: edges.map((e) => [f("- "), { kind: "term", text: e.a.label }, f(" × "), { kind: "term", text: e.b.label }, f(`（共現 ${e.weight} 次）`)] as Segment[]),
+      // 共現次數是整數（同一句內共同出現的句子數）；萬一不是整數或超出樣式範圍，就不顯示次數，而不是顯示錯的數字
+      bullets: edges.map((e) => [f("- "), { kind: "term", text: e.a.label }, f(" × "), { kind: "term", text: e.b.label }, ...(Number.isInteger(e.weight) && e.weight >= 0 && e.weight <= 9999 ? [f(`（共現 ${e.weight} 次）`)] : [])] as Segment[]),
       notes: edges.flatMap((e) => {
         const s = d.sentences.find((x) => x.conceptIds.includes(e.a.id) && x.conceptIds.includes(e.b.id));
         return s ? [quoteLine(s)] : [];
@@ -91,7 +96,7 @@ export function buildSlides(d: Digest): SlidesResult {
 
 /** 所有「內容行」片段（標題行、條列、講稿），供驗證與 Markdown 共用 */
 export function slideLines(r: SlidesResult): Segment[][] {
-  return r.slides.flatMap((s, i) => [[f(`## 第 ${i + 1} 頁：`), ...s.title], ...s.bullets, ...(s.notes.length ? [[f("講稿：")]] : []), ...s.notes.map((n) => [f("- "), ...n])]);
+  return r.slides.flatMap((s, i) => [[f(`## 第 ${i + 1} 頁：`), ...s.title], ...s.bullets, ...(s.notes.length ? [[f("講稿：")]] : []), ...(s.notes.length && s.notesLabel ? [s.notesLabel] : []), ...s.notes.map((n) => [f("- "), ...n])]);
 }
 
 export function slidesToMarkdown(r: SlidesResult): string {
@@ -105,6 +110,7 @@ export function slidesToMarkdown(r: SlidesResult): string {
     for (const b of s.bullets) out.push(segmentsToText(b, { escape: escapeMarkdown }));
     if (s.notes.length) {
       out.push("", "講稿：");
+      if (s.notesLabel) out.push(segmentsToText(s.notesLabel));
       for (const n of s.notes) out.push(segmentsToText([f("- "), ...n], { escape: escapeMarkdown }));
     }
     out.push("");

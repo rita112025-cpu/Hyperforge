@@ -124,13 +124,15 @@ describe("Threads 三種版型", () => {
     const joined = clauseSlices(s).map(([a, b]) => F.src.get(s.docId)!.rawText.slice(a, b)).join("");
     expect(joined).toBe(s.text.replace(/\s+/g, (m) => (joined.includes(m) ? m : "")));
   });
-  it("chain：引文依文件順序（docId、start）串接", () => {
+  it("chain：引文依「文件名稱、同文件內原文位置」串接（標示不再說成文件順序）", () => {
     const r = buildThreads(F.d, "chain");
     const qs = r.posts.flatMap((p) => p.filter((s): s is Extract<typeof s, { kind: "quote" }> => s.kind === "quote"));
     for (let i = 1; i < qs.length; i++) {
       const a = qs[i - 1];
       const b = qs[i];
-      expect(a.docId < b.docId || (a.docId === b.docId && a.start < b.start) || (a.docId === b.docId && a.start === b.start)).toBe(true);
+      const an = F.src.get(a.docId)!.name;
+      const bn = F.src.get(b.docId)!.name;
+      expect(an < bn || (an === bn && a.start <= b.start)).toBe(true);
     }
   });
   it("單一句子（加上頁碼與來源）超過 500 字元：略過並說明，不截斷引文", () => {
