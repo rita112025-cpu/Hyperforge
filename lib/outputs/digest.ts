@@ -32,6 +32,8 @@ export interface Digest {
   sentences: DigestSentence[];
   /** 共現最強的概念對（只含真實節點） */
   topEdges: Array<{ a: GraphNode; b: GraphNode; weight: number }>;
+  /** 圖譜上真實節點之間的全部共現邊（依權重、id 排序），心智圖用 */
+  edges: Array<{ a: string; b: string; weight: number }>;
   /** 概念 id → 出現過的文件（id 與名稱；取自圖譜的 evidence，是精確的，不受句子長度過濾影響） */
   conceptDocs: Record<string, Array<{ id: string; name: string }>>;
   /** 資料基礎（與畫布狀態列相同的數字），UI 必須顯示，截斷時要明說 */
@@ -105,11 +107,11 @@ export function buildDigest(input: GraphDocument[], graph: GraphModel): Digest {
   });
   sentences.sort((a, b) => b.score - a.score || cmp(a.docId, b.docId) || a.start - b.start);
 
-  const topEdges = graph.edges
+  const realEdges = graph.edges
     .filter((e) => e.kind === "co-occurrence" && byId.has(e.a) && byId.has(e.b))
-    .sort((a, b) => b.weight - a.weight || cmp(a.id, b.id))
-    .slice(0, 20)
-    .map((e) => ({ a: byId.get(e.a)!, b: byId.get(e.b)!, weight: e.weight }));
+    .sort((a, b) => b.weight - a.weight || cmp(a.id, b.id));
+  const topEdges = realEdges.slice(0, 20).map((e) => ({ a: byId.get(e.a)!, b: byId.get(e.b)!, weight: e.weight }));
+  const edges = realEdges.map((e) => ({ a: e.a, b: e.b, weight: e.weight }));
 
   const conceptDocs: Digest["conceptDocs"] = {};
   for (const c of concepts) conceptDocs[c.id] = (graph.evidence[c.id]?.docs ?? []).map((d) => ({ id: d.docId, name: d.docName })).sort((a, b) => cmp(a.id, b.id)); // 依文件 id 排序：與輸入順序無關
@@ -119,6 +121,7 @@ export function buildDigest(input: GraphDocument[], graph: GraphModel): Digest {
     concepts,
     sentences,
     topEdges,
+    edges,
     conceptDocs,
     basis: basisOf(graph),
   };

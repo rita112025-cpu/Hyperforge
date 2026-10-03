@@ -115,3 +115,17 @@ describe("Notion：pages 帶有 parent 占位符，使用流程是兩步", () =>
     expect(n.note).toContain("未驗證");
   });
 });
+
+describe("setext 標題底線（只由 = 組成的行）", () => {
+  it("行首只由 = 組成的行會被跳脫，還原後等於原文", () => {
+    for (const s of ["title\n===", "title\n=====\nnext", "===", "a\n= = =\nb"]) {
+      const out = escapeMarkdown(s);
+      expect(unescapeMarkdown(out), s).toBe(s);
+      for (const line of out.split("\n")) expect(/^=+\s*$/.test(line), JSON.stringify(line)).toBe(false);
+    }
+  });
+  it("一般含 = 的句子不受影響", () => {
+    expect(escapeMarkdown("a = b")).toBe("a = b");
+    expect(escapeMarkdown("x==y")).toBe("x==y");
+  });
+});

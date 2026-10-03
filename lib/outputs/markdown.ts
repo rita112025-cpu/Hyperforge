@@ -15,6 +15,7 @@ export function escapeMarkdown(text: string): string {
     .replace(ESCAPE_CHARS, "\\$&")
     .replace(/(^|\n)([-+])(?=\s)/g, "$1\\$2") // 行首的 - / + 清單
     .replace(/(^|\n)(\d+)\.(?=\s|$)/g, "$1$2\\.") // 行首的「1.」編號
+    .replace(/(^|\n)(=+)(?=[ \t]*(\n|$))/g, "$1\\$2") // 只由 = 組成的行：setext 標題底線（會把前一行變成標題）
     .replace(/([A-Za-z]):/g, "$1\\:") // 自動連結的 scheme（http: / javascript: / mailto:）
     .replace(/\bwww\./gi, (m) => `${m.slice(0, -1)}\\.`);
 }
