@@ -4,7 +4,14 @@ out
 *.tsbuildinfo
 next-env.d.ts
 .env*.local
+.logs/
 
 # 自託管的大檔：用 npm run fetch-model 取得
 public/models
 public/ort
+
+# Local temporary files and delivery artifacts
+.tmp
+dist
+release
+*.zip
