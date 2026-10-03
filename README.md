@@ -18,13 +18,13 @@ npm test
 
 雙擊專案根目錄的 `Start-HyperForge.bat`，會使用免安裝 Node（預設 `D:\tools\node-v22.23.3-win-x64`），等待 HyperForge 就緒後開啟 `http://localhost:3000`。若依賴尚未安裝，會依 lockfile 執行 `npm ci`；沒有 lockfile 才使用 `npm install`。不會重新下載模型。
 
-建立或更新目前使用者桌面的「HyperForge」捷徑，只需執行一次（不需管理員權限）：
+建立或更新目前使用者桌面的「HyperForge」（啟動，圖示為 `hyperforge_hammer.ico`）與「Stop HyperForge」（停止）捷徑，只需執行一次（不需管理員權限）：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\create-desktop-shortcut.ps1
 ```
 
-已執行的 HyperForge 會直接開啟瀏覽器；port 3000 被其他程式占用時會顯示錯誤與可取得的 PID，不會關閉該程式或更換 port。啟動失敗時視窗會保留錯誤，伺服器輸出位於 `.logs\hyperforge-dev.log`。啟動器結束後，開發伺服器仍在背景執行；需要停止時，可在工作管理員確認本專案的程序後自行結束。
+已執行的 HyperForge 會直接開啟瀏覽器；port 3000 被其他程式占用時會顯示錯誤與可取得的 PID，不會關閉該程式或更換 port。啟動失敗時視窗會保留錯誤，伺服器輸出位於 `.logs\hyperforge-dev.log`。啟動器結束後，開發伺服器仍在背景執行。需要停止時，雙擊 `Stop-HyperForge.bat`（或桌面的「Stop HyperForge」）：啟動成功後會把這次啟動的程序記錄在 `.logs\hyperforge.pid`（含建立時間，避免 PID 被重用時誤殺），停止時只終止該程序樹，不會以映像名稱結束其他 `node.exe`；沒有 PID 檔時，只會停止「可驗證為本專案 Next dev server」的 port 3000 監聽者。HyperForge 沒在執行時會顯示 `HyperForge is not running.` 並正常結束；port 3000 被其他程式占用時不會動它。
 
 ## Hugging Face Static Space
 
