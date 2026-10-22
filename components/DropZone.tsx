@@ -82,7 +82,7 @@ export default function DropZone() {
       role="button"
       tabIndex={0}
       aria-label="匯入文件：可點擊選檔、拖放檔案，或在非輸入欄位貼上文字"
-      className={`relative cursor-pointer rounded-2xl border border-dashed p-16 text-center font-mono backdrop-blur transition-colors focus:outline-none focus:ring-2 focus:ring-violet-300 ${
+      className={`relative cursor-pointer rounded-2xl border border-dashed px-6 py-10 text-center font-mono backdrop-blur transition-colors focus:outline-none focus:ring-2 focus:ring-violet-300 ${
         over ? "border-neon-cyan bg-cyan-400/10" : "border-violet-400/40 bg-white/5 hover:border-violet-300"
       }`}
     >
@@ -96,8 +96,10 @@ export default function DropZone() {
           e.target.value = "";
         }}
       />
-      <div className="text-lg text-violet-200">拖入任何東西 · DROP ANYTHING</div>
-      <div className="mt-2 text-xs text-zinc-500">目前僅支援文字類檔案（.md / .txt / 程式碼）與貼上文字 (Ctrl+V)；PDF / 圖片 / 音訊 / 影片 / zip / 連結 尚未支援，會顯示錯誤</div>
+      <div className="text-lg text-violet-200">點此選擇文字檔，或將檔案拖到這裡</div>
+      <div className="mt-2 text-xs text-zinc-500">支援 .txt、.md 與程式碼檔案。也可以在頁面空白處按 Ctrl+V（Mac：⌘V）貼上文字。</div>
+      <p className="mt-2 text-xs text-zinc-400">目前不支援 PDF、圖片、影音、壓縮檔或網址；請先複製其中的文字。</p>
     </div>
   );
 }
+
