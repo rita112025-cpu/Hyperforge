@@ -175,7 +175,9 @@ export default function GraphWorkspace() {
   };
 
   return (
-    <section className="space-y-3" aria-label="Infinite Alchemy Canvas">
+    <section className="space-y-3" aria-label="概念圖與匯出內容">
+      <h2 className="text-lg text-violet-200">概念圖</h2>
+      <p className="text-sm text-zinc-400">點選概念查看原文。連線表示兩個概念曾出現在同一句話中。</p>
       <div className="flex flex-wrap items-center gap-2 font-mono text-xs" data-testid="graph-toolbar">
         <button
           className="rounded border border-white/15 px-2 py-1 text-zinc-200 hover:border-violet-300"
@@ -282,7 +284,17 @@ export default function GraphWorkspace() {
 
       <DocumentList docs={docList} docInfo={docInfo} onRetry={(id) => void retryIndexing(id)} />
 
-      <div className="space-y-1 font-mono text-[11px] text-zinc-500" data-testid="graph-status">
+      {unsavedCount > 0 && (
+        <p role="alert" className="text-sm text-amber-300">
+          {unsavedCount} 份文件尚未儲存，重新整理後可能遺失。請保留原始文字。
+        </p>
+      )}
+      {db.state === "error" && (
+        <p role="alert" className="text-sm text-red-400">無法讀取已儲存的文件：{db.message}。目前只顯示本次加入的內容。</p>
+      )}
+      <details className="rounded-lg border border-white/10 p-3">
+        <summary className="cursor-pointer text-sm text-zinc-400">查看儲存、語意索引與分析方式</summary>
+      <div className="mt-3 space-y-1 font-mono text-[11px] text-zinc-500" data-testid="graph-status">
         <div data-testid="graph-counts">
           文件 {stats.docCount} 份 · 概念 {stats.shownNodes} 個 · 連線 {stats.shownEdges} 條
           {temps.length > 0 && ` · ${ALCHEMY_BADGE}節點 ${model.nodes.filter((n) => n.temporary).length} 個`}
@@ -328,6 +340,8 @@ export default function GraphWorkspace() {
         </div>
       </div>
 
+      </details>
+
       {/* 無障礙：Canvas 內容的文字替代（React 文字節點） */}
       <ul className="sr-only" aria-label="圖譜節點清單">
         {model.nodes.map((n) => (
@@ -337,3 +351,4 @@ export default function GraphWorkspace() {
     </section>
   );
 }
+
