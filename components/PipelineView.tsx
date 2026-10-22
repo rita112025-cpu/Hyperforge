@@ -57,7 +57,7 @@ export default function PipelineView() {
     <div className="space-y-4">
       {jobs.map((job) => (
         <div key={job.id} className="scanlines relative overflow-hidden rounded-xl border border-white/10 bg-white/5 p-4 font-mono backdrop-blur">
-          <div className="mb-3 flex items-center justify-between gap-3 text-sm">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3 text-sm">
             <span
               className={`min-w-0 truncate ${job.status === "running" ? "glitch text-neon-cyan" : "text-zinc-200"}`}
               data-text={job.name}
@@ -65,7 +65,7 @@ export default function PipelineView() {
             >
               {job.name}
             </span>
-            <span className="flex shrink-0 items-center gap-2 text-xs text-zinc-500" data-testid="job-status" data-status={job.status}>
+            <span className="flex flex-wrap items-center gap-2 text-xs text-zinc-400" data-testid="job-status" data-status={job.status}>
               {JOB_LABEL[job.status]}
               {job.status === "running" && (
                 <button
@@ -80,7 +80,7 @@ export default function PipelineView() {
           </div>
           <details className="mb-3">
             <summary className="cursor-pointer text-xs text-zinc-400">查看處理步驟</summary>
-          <ol className="mt-3 space-y-2">
+            <ol className="mt-3 space-y-2">
             {job.stages.map((st) => (
               <li key={st.id} className="text-xs">
                 <div className="mb-1 flex justify-between text-zinc-400">
@@ -100,7 +100,7 @@ export default function PipelineView() {
                 {st.note && <div className="mt-0.5 break-all text-[10px] text-zinc-600">{st.note}</div>}
               </li>
             ))}
-          </ol>
+            </ol>
           </details>
           {job.error && <div className="mt-3 text-xs text-red-400">{job.error}</div>}
           <JobTextVector job={job} />
