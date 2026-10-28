@@ -103,6 +103,18 @@ export class WorkerEmbedder implements Embedder {
     return this.queue.length + (this.current ? 1 : 0);
   }
 
+  get running(): boolean {
+    return this.current !== null;
+  }
+
+  /** 取消所有請求並終止 Worker；之後仍可使用（下次 embed 時重新建立 Worker）。 */
+  abortAll(): void {
+    this.dropWorker();
+    for (const j of [this.current, ...this.queue]) if (j) this.settle(j, abortError());
+    this.current = null;
+    this.queue = [];
+  }
+
   embed(texts: string[], opts: EmbedOptions = {}): Promise<Float32Array[]> {
     if (!texts.length) return Promise.resolve([]);
     const { signal } = opts;

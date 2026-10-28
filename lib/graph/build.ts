@@ -1,5 +1,5 @@
 import { MAX_EVIDENCE_OCCURRENCES, MAX_GRAPH_EDGES, MAX_GRAPH_NODES } from "./constants";
-import { extractConcepts, type TermOccurrence } from "./extract";
+import { extractConcepts, type ExtractResult, type TermOccurrence } from "./extract";
 import { seededPosition } from "./seed";
 import type { GraphChunk, GraphDocument, GraphEdge, GraphModel, GraphNode, NodeEvidence } from "./types";
 
@@ -46,13 +46,27 @@ export function chunksOverlapping(chunks: GraphChunk[], start: number, end: numb
   return out;
 }
 
+/** 建圖第 1 段：去重並排除沒有 chunk 的文件。後兩段的 docs 必須是本函式的輸出。 */
+export function prepareDocuments(input: GraphDocument[]): GraphDocument[] {
+  return dedupeDocuments(input).filter((d) => d.chunks.length > 0);
+}
+
+/** 建圖第 2 段：概念擷取（最耗時的一段）。 */
+export function extractFromDocuments(docs: GraphDocument[]): ExtractResult {
+  return extractConcepts(docs.map((d) => ({ docId: d.id, text: d.rawText })));
+}
+
 export function buildGraph(input: GraphDocument[], opts: BuildOptions = {}): GraphModel {
+  const docs = prepareDocuments(input);
+  return assembleGraph(docs, extractFromDocuments(docs), opts);
+}
+
+/** 建圖第 3 段：nodes / evidence / co-occurrence edges。分段讓 graph.worker 能在段與段之間回報進度與檢查取消。 */
+export function assembleGraph(docs: GraphDocument[], extraction: ExtractResult, opts: BuildOptions = {}): GraphModel {
   const maxNodes = opts.maxNodes ?? MAX_GRAPH_NODES;
   const maxEdges = opts.maxEdges ?? MAX_GRAPH_EDGES;
-  const docs = dedupeDocuments(input).filter((d) => d.chunks.length > 0);
   const chunkCount = docs.reduce((n, d) => n + d.chunks.length, 0);
 
-  const extraction = extractConcepts(docs.map((d) => ({ docId: d.id, text: d.rawText })));
   const ranked = extraction.concepts;
   const shown = ranked.slice(0, maxNodes);
   const maxScore = shown[0]?.score ?? 0;
