@@ -1,6 +1,13 @@
+# Optional: -NodeDir <folder containing node.exe and npm.cmd>. Same as env var HYPERFORGE_NODE_DIR.
+param([string]$NodeDir)
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$nodeDirectory = 'D:\tools\node-v22.23.3-win-x64'
+# Legacy portable Node location; used only if it exists (kept for backward compatibility).
+$legacyNodeDirectory = 'D:\tools\node-v22.23.3-win-x64'
+# Used when package.json has no engines.node (the launcher previously pinned Node 22).
+$defaultNodeMajor = 22
+$nodeDirectory = $null
+$npmCmd = $null
 $probeUrl = 'http://127.0.0.1:3000'
 $browserUrl = 'http://localhost:3000'
 $logPath = Join-Path $repoRoot '.logs\hyperforge-dev.log'
@@ -20,6 +27,111 @@ function Test-HyperForgeReady {
     return $true
 }
 
+# Resolve Node in order: (a) -NodeDir / HYPERFORGE_NODE_DIR, (b) legacy D:\tools folder if present, (c) PATH.
+function Resolve-NodeTools {
+    param([string]$RequestedDir)
+    $source = '-NodeDir parameter'
+    if (-not $RequestedDir -and $env:HYPERFORGE_NODE_DIR) {
+        $RequestedDir = $env:HYPERFORGE_NODE_DIR
+        $source = 'HYPERFORGE_NODE_DIR'
+    }
+    if ($RequestedDir) {
+        # An explicit choice must work; do not silently fall back to another Node.
+        $missing = @()
+        foreach ($file in @('node.exe', 'npm.cmd')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $RequestedDir $file) -PathType Leaf)) { $missing += $file }
+        }
+        if ($missing.Count -gt 0) {
+            throw ("Node folder from $source is missing $($missing -join ' and '): $RequestedDir`n" +
+                "Point it to the folder that contains node.exe and npm.cmd, or remove the setting to use Node from PATH.")
+        }
+        return [pscustomobject]@{
+            Dir = $RequestedDir; Node = (Join-Path $RequestedDir 'node.exe'); Npm = (Join-Path $RequestedDir 'npm.cmd'); Source = $source
+        }
+    }
+    $legacyNode = Join-Path $legacyNodeDirectory 'node.exe'
+    $legacyNpm = Join-Path $legacyNodeDirectory 'npm.cmd'
+    if ((Test-Path -LiteralPath $legacyNode -PathType Leaf) -and (Test-Path -LiteralPath $legacyNpm -PathType Leaf)) {
+        return [pscustomobject]@{ Dir = $legacyNodeDirectory; Node = $legacyNode; Npm = $legacyNpm; Source = 'legacy portable folder' }
+    }
+    $nodeFound = Get-Command 'node.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $npmFound = Get-Command 'npm.cmd' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($nodeFound -and $npmFound) {
+        return [pscustomobject]@{
+            Dir = (Split-Path -Parent $nodeFound.Source); Node = $nodeFound.Source; Npm = $npmFound.Source; Source = 'PATH'
+        }
+    }
+    throw ("Node.js was not found. HyperForge looked in:`n" +
+        "  1. -NodeDir parameter / HYPERFORGE_NODE_DIR environment variable (not set)`n" +
+        "  2. $legacyNodeDirectory (not found)`n" +
+        "  3. node.exe and npm.cmd on PATH (not found)`n" +
+        "Fix one of these:`n" +
+        "  - Install Node.js $defaultNodeMajor LTS from https://nodejs.org/ (adds node and npm to PATH), then run the launcher again.`n" +
+        "  - Or set HYPERFORGE_NODE_DIR to a folder that contains node.exe and npm.cmd, for example:`n" +
+        "      setx HYPERFORGE_NODE_DIR ""C:\path\to\node-v22-win-x64""   (then open a new window)`n" +
+        "  - Or run: Start-HyperForge.bat -NodeDir ""C:\path\to\node-v22-win-x64""")
+}
+
+# Checks one major version against a simple engines.node range ("22", "^22", "22.x", ">=20 <23", "20 || 22").
+# Returns $true / $false, or $null if the range syntax is not understood.
+function Test-NodeMajorInRange {
+    param([int]$Major, [string]$Range)
+    foreach ($alternative in ($Range -split '\|\|')) {
+        $tokens = @($alternative.Trim() -split '\s+' | Where-Object { $_ })
+        if ($tokens.Count -eq 0) { return $null }
+        $ok = $true
+        foreach ($token in $tokens) {
+            if ($token -notmatch '^(>=|<=|>|<|\^|~|=)?v?(\d+)(?:\.(\d+|x|\*))?(?:\.(\d+|x|\*))?$') { return $null }
+            # Copy the groups first: the -match calls below overwrite $Matches.
+            $op = $Matches[1]
+            $n = [int]$Matches[2]
+            $minor = [string]$Matches[3]
+            $patch = [string]$Matches[4]
+            $hasNumericMinor = ($minor -match '^\d+$')
+            $hasNonZeroPart = (($minor -match '^\d+$') -and [int]$minor -gt 0) -or (($patch -match '^\d+$') -and [int]$patch -gt 0)
+            switch ($op) {
+                '>=' { if ($Major -lt $n) { $ok = $false } }
+                '>'  { if ($hasNumericMinor) { if ($Major -lt $n) { $ok = $false } } elseif ($Major -le $n) { $ok = $false } }
+                '<=' { if ($Major -gt $n) { $ok = $false } }
+                '<'  { if ($hasNonZeroPart) { if ($Major -gt $n) { $ok = $false } } elseif ($Major -ge $n) { $ok = $false } }
+                default { if ($Major -ne $n) { $ok = $false } }
+            }
+        }
+        if ($ok) { return $true }
+    }
+    return $false
+}
+
+function Assert-NodeVersion {
+    param($Tools)
+    $nodePath = $Tools.Node
+    $versionText = "$(& $nodePath --version | Select-Object -First 1)"
+    if ($LASTEXITCODE -ne 0 -or $versionText -notmatch '^v(\d+)\.') {
+        throw "Could not read the Node.js version from $nodePath (found via $($Tools.Source))."
+    }
+    $major = [int]$Matches[1]
+    $range = $null
+    try {
+        $pkg = Get-Content -LiteralPath (Join-Path $repoRoot 'package.json') -Raw | ConvertFrom-Json
+        if ($pkg.engines -and $pkg.engines.node) { $range = [string]$pkg.engines.node }
+    } catch { }
+    if ($range) {
+        $inRange = Test-NodeMajorInRange -Major $major -Range $range
+        if ($null -eq $inRange) {
+            Write-Host "Warning: could not interpret package.json engines.node '$range'; skipping the Node version check." -ForegroundColor Yellow
+            return
+        }
+        $wanted = "engines.node '$range' in package.json"
+    } else {
+        $inRange = ($major -eq $defaultNodeMajor)
+        $wanted = "Node.js $defaultNodeMajor (package.json has no engines.node, so the launcher's default is used)"
+    }
+    if (-not $inRange) {
+        throw ("Node.js $versionText at $nodePath (found via $($Tools.Source)) does not match $wanted.`n" +
+            "Install a matching Node.js LTS, or set HYPERFORGE_NODE_DIR / -NodeDir to a folder with a matching node.exe and npm.cmd.")
+    }
+}
+
 function Show-Log {
     Write-Host "Log: $logPath"
     if (Test-Path -LiteralPath $logPath) {
@@ -28,12 +140,11 @@ function Show-Log {
 }
 
 try {
-    foreach ($file in @('node.exe', 'npm.cmd')) {
-        $path = Join-Path $nodeDirectory $file
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-            throw "Required portable Node file is missing: $path"
-        }
-    }
+    $nodeTools = Resolve-NodeTools -RequestedDir $NodeDir
+    Assert-NodeVersion $nodeTools
+    $nodeDirectory = $nodeTools.Dir
+    $npmCmd = $nodeTools.Npm
+    Write-Host "Using Node: $($nodeTools.Node) ($($nodeTools.Source))"
     $env:Path = "$nodeDirectory;$env:Path"
     Set-Location -LiteralPath $repoRoot
     # Serialize clicks, including clicks while the first server is compiling.
@@ -67,14 +178,14 @@ try {
         Write-Host 'First run: installing dependencies...'
         $installCommand = 'install'
         if (Test-Path -LiteralPath (Join-Path $repoRoot 'package-lock.json')) { $installCommand = 'ci' }
-        & (Join-Path $nodeDirectory 'npm.cmd') $installCommand
+        & $npmCmd $installCommand
         if ($LASTEXITCODE -ne 0) { throw "npm $installCommand failed with exit code $LASTEXITCODE." }
     }
 
     New-Item -ItemType Directory -Path (Split-Path -Parent $logPath) -Force | Out-Null
     # A separate hidden Windows process survives the BAT/PowerShell exit.
     # Explicit port prevents Next from silently moving to a different port.
-    $command = '""{0}" run dev -- --port 3000 > "{1}" 2>&1"' -f (Join-Path $nodeDirectory 'npm.cmd'), $logPath
+    $command = '""{0}" run dev -- --port 3000 > "{1}" 2>&1"' -f $npmCmd, $logPath
     $server = Start-Process -FilePath $env:ComSpec -ArgumentList @('/d', '/s', '/c', $command) -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru
     Write-Host "Starting HyperForge (server command PID: $($server.Id))..."
     Write-Host "Log: $logPath"
