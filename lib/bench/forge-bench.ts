@@ -121,8 +121,13 @@ export function monitorMainThread(intervalMs = 10): { stop(): MainThreadReport }
     observer.observe({ type: "longtask" });
   }
 
+  let report: MainThreadReport | null = null;
   return {
+    /** 可重複呼叫；只有第一次會結算。 */
     stop() {
+      if (report) return report;
+      // 計時器若已逾期但還沒機會執行（最後一段同步工作剛結束），那段阻塞也要算進去
+      maxBlockMs = Math.max(maxBlockMs, performance.now() - expected);
       clearTimeout(timer);
       if (observer) {
         for (const e of observer.takeRecords()) {
@@ -131,7 +136,8 @@ export function monitorMainThread(intervalMs = 10): { stop(): MainThreadReport }
         }
         observer.disconnect();
       }
-      return { maxBlockMs: Math.max(0, maxBlockMs), longestTaskMs, longTaskCount };
+      report = { maxBlockMs: Math.max(0, maxBlockMs), longestTaskMs, longTaskCount };
+      return report;
     },
   };
 }

@@ -69,6 +69,8 @@ export default function Obsidian9PageV6() {
     return () => {
       cancelled = true
       controller.abort()
+      // 離開頁面時一併停止進行中的投料，避免孤兒 pipeline 繼續佔用共用 Worker
+      abortRef.current?.abort()
     }
   }, [])
 
@@ -140,12 +142,15 @@ export default function Obsidian9PageV6() {
       setTextStatus(pipelineResult.textStatus)
       setVectorStatus(pipelineResult.vectorStatus)
 
-      // 最後再從 DB 重建一次，確保重新整理後也能顯示（text-first persistence）；仍可取消
-      try {
-        const corpus = await loadCorpus(getSharedDb())
-        if (await rebuildGraph(corpus, controller.signal)) log(`重新整理後可重建 corpus docs=${corpus.length}`)
-      } catch (error) {
-        log(`重新載入 corpus 失敗: ${error instanceof Error ? error.message : String(error)}`)
+      // 最後再從 DB 重建一次，確保重新整理後也能顯示（text-first persistence）；仍可取消。
+      // 文字未持久化時 DB 裡沒有這份文件，重建會蓋掉本次工作階段的圖譜，所以略過。
+      if (pipelineResult.textStatus === 'ready') {
+        try {
+          const corpus = await loadCorpus(getSharedDb())
+          if (await rebuildGraph(corpus, controller.signal)) log(`重新整理後可重建 corpus docs=${corpus.length}`)
+        } catch (error) {
+          log(`重新載入 corpus 失敗: ${error instanceof Error ? error.message : String(error)}`)
+        }
       }
 
       setPhase('done')
