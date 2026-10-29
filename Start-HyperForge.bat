@@ -2,7 +2,7 @@
 setlocal
 title HyperForge
 cd /d "%~dp0"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-hyperforge.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-hyperforge.ps1" %*
 set "RESULT=%ERRORLEVEL%"
 if not "%RESULT%"=="0" (
     echo.

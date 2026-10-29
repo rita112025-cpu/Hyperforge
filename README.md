@@ -16,7 +16,7 @@ npm test
 
 ## Windows 雙擊啟動
 
-雙擊專案根目錄的 `Start-HyperForge.bat`，會使用免安裝 Node（預設 `D:\tools\node-v22.23.3-win-x64`），等待 HyperForge 就緒後開啟 `http://localhost:3000`。若依賴尚未安裝，會依 lockfile 執行 `npm ci`；沒有 lockfile 才使用 `npm install`。不會重新下載模型。
+雙擊專案根目錄的 `Start-HyperForge.bat`，會依序尋找 Node：(1) `Start-HyperForge.bat -NodeDir "<資料夾>"` 或環境變數 `HYPERFORGE_NODE_DIR`（資料夾需含 `node.exe` 與 `npm.cmd`）；(2) 舊的免安裝路徑 `D:\tools\node-v22.23.3-win-x64`（存在才用）；(3) PATH 上的 `node` / `npm`。Node 主版本需符合 `package.json` 的 `engines.node`（未設定時為 22），不符或找不到時會顯示原因與安裝／指定方式。等待 HyperForge 就緒後開啟 `http://localhost:3000`。若依賴尚未安裝，會依 lockfile 執行 `npm ci`；沒有 lockfile 才使用 `npm install`。不會重新下載模型。
 
 建立或更新目前使用者桌面的「HyperForge」（啟動，圖示為 `hyperforge_hammer.ico`）與「Stop HyperForge」（停止）捷徑，只需執行一次（不需管理員權限）：
 
