@@ -191,3 +191,16 @@ describe("runPipeline + chunker", () => {
     expect(w.terminated).toBe(true);
   });
 });
+
+it("postMessage 丟錯後可以繼續處理下一份文件", async () => {
+  let spawned = 0;
+  let sent: DeconstructRequest | undefined;
+  const healthy: DeconstructWorkerLike = { postMessage: (m) => { sent = m; }, terminate: () => {}, onmessage: null, onerror: null };
+  const broken: DeconstructWorkerLike = { ...healthy, postMessage: () => { throw new Error("clone failed"); } };
+  const c = new DeconstructClient({ supported: () => true, spawn: () => spawned++ === 0 ? broken : healthy });
+  await expect(c.deconstruct("first")).rejects.toThrow("clone failed");
+  const next = c.deconstruct("second");
+  expect(sent).toBeDefined();
+  healthy.onmessage?.({ data: runDeconstruct(sent!) });
+  expect(await next).toEqual(chunkText("second"));
+});

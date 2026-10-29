@@ -1,17 +1,20 @@
 import { buildGraph } from "./build";
+import { buildDigest, type Digest } from "../outputs/digest";
 import type { GraphDocument, GraphModel } from "./types";
 
 /** 圖譜 Worker 的訊息協定（主執行緒一次只送一個 request，FIFO 由 graph-client 負責） */
-export type GraphRequest = { id: number; docs: GraphDocument[] };
+export type GraphAnalysis = { graph: GraphModel; digest: Digest | null };
+export type GraphRequest = { id: number; docs: GraphDocument[]; includeDigest?: boolean };
 export type GraphResponse =
-  | { id: number; ok: true; graph: GraphModel; durationMs: number }
+  | { id: number; ok: true; graph: GraphModel; digest?: Digest | null; durationMs: number }
   | { id: number; ok: false; error: string };
 
 export function handleGraphRequest(req: GraphRequest, now: () => number = () => Date.now()): GraphResponse {
   const t0 = now();
   try {
     const graph = buildGraph(req.docs);
-    return { id: req.id, ok: true, graph, durationMs: now() - t0 };
+    const digest = req.includeDigest && graph.nodes.length > 0 ? buildDigest(req.docs, graph) : null;
+    return { id: req.id, ok: true, graph, digest, durationMs: now() - t0 };
   } catch (e) {
     return { id: req.id, ok: false, error: e instanceof Error ? e.message : String(e) };
   }

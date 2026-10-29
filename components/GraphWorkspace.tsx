@@ -2,6 +2,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ALCHEMY_BADGE, MIN_ALCHEMY_PARENTS, composeModel, defaultAlchemyName, makeAlchemyNode } from "../lib/graph/alchemy";
 import { buildGraph, dedupeDocuments } from "../lib/graph/build";
+import { getGraphClient } from "../lib/graph/graph-client";
+import type { GraphAnalysis } from "../lib/graph/graph.worker";
 import { GraphController, type SelectionChange } from "../lib/graph/controller";
 import { docInfoFromDb, loadCorpus, loadVectorPresence } from "../lib/graph/corpus";
 import { EXTRACT_METHOD_NOTE, PERSON_METHOD_NOTE } from "../lib/graph/extract";
@@ -14,6 +16,8 @@ import DocumentList from "./DocumentList";
 import OutputsPanel from "./OutputsPanel";
 import GraphCanvas, { type CanvasContextMenuEvent } from "./GraphCanvas";
 import SourcePanel from "./SourcePanel";
+
+const EMPTY_GRAPH = buildGraph([]);
 
 type DbState = { state: "loading" } | { state: "ok"; count: number } | { state: "error"; message: string };
 
@@ -81,7 +85,22 @@ export default function GraphWorkspace() {
   }, []);
 
   const allDocs = useMemo(() => [...persisted, ...live], [persisted, live]);
-  const base = useMemo(() => buildGraph(allDocs), [allDocs]);
+  const [analysis, setAnalysis] = useState<(GraphAnalysis & { docs: GraphDocument[] }) | null>(null);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const currentAnalysis = analysis?.docs === allDocs ? analysis : null;
+  const base = currentAnalysis?.graph ?? analysis?.graph ?? EMPTY_GRAPH;
+  const analyzing = currentAnalysis === null;
+
+  useEffect(() => {
+    const ac = new AbortController();
+    setAnalysisError(null);
+    void getGraphClient().analyze(allDocs, ac.signal).then((result) => {
+      if (!ac.signal.aborted) setAnalysis({ ...result, docs: allDocs });
+    }).catch((e: unknown) => {
+      if (!ac.signal.aborted) setAnalysisError(e instanceof Error ? e.message : String(e));
+    });
+    return () => ac.abort();
+  }, [allDocs]);
   const model = useMemo(() => composeModel(base, temps), [base, temps]);
   const docsById = useMemo(() => new Map(dedupeDocuments(allDocs).map((d) => [d.id, d])), [allDocs]);
   const nodeById = useMemo(() => new Map(model.nodes.map((n) => [n.id, n])), [model]);
@@ -178,6 +197,8 @@ export default function GraphWorkspace() {
     <section className="space-y-3" aria-label="概念圖與匯出內容">
       <h2 className="text-lg text-violet-200">概念圖</h2>
       <p className="text-sm text-zinc-400">點選概念查看原文。連線表示兩個概念曾出現在同一句話中。</p>
+      {analyzing && !analysisError && <p role="status" className="text-sm text-zinc-400">正在整理概念與摘要，原文仍可在下方查看或下載。</p>}
+      {analysisError && <p role="alert" className="text-sm text-amber-300">概念分析失敗：{analysisError}。原文仍可在輸出面板查看或下載。</p>}
       <div className="flex flex-wrap items-center gap-2 font-mono text-xs" data-testid="graph-toolbar">
         <button
           className="rounded border border-white/15 px-2 py-1 text-zinc-200 hover:border-violet-300"
@@ -203,7 +224,9 @@ export default function GraphWorkspace() {
 
           {nothingToShow && (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-8 text-center text-xs text-zinc-500" data-testid="graph-empty">
-              {hasDocs
+              {analyzing
+                ? (analysisError ? "概念分析未完成，請保留原文或重新整理後再試。" : "正在整理概念…")
+                : hasDocs
                 ? `已載入 ${stats.docCount} 份文件，但沒有任何詞達到證據門檻（詞至少出現 2 次、文件需有足夠長度；過短文件 ${stats.skippedDocCount} 份），所以沒有概念可顯示。`
                 : "尚無內容。拖入文字檔或貼上文字後，概念會浮現在這裡。"}
             </div>
@@ -278,7 +301,7 @@ export default function GraphWorkspace() {
             selectedCount={sel.ids.length}
             parentLabels={focusNode?.parents?.map((id) => nodeById.get(id)?.label ?? id)}
           />
-          <OutputsPanel docs={allDocs} graph={base} />
+          <OutputsPanel docs={allDocs} graph={currentAnalysis?.graph ?? EMPTY_GRAPH} digest={currentAnalysis?.digest ?? null} analyzing={analyzing && !analysisError} />
         </div>
       </div>
 

@@ -37,6 +37,7 @@ export function isEditablePasteTarget(target: EventTarget | null): boolean {
 export default function DropZone() {
   const ingest = useForge((s) => s.ingest);
   const [over, setOver] = useState(false);
+  const [draft, setDraft] = useState("");
   const input = useRef<HTMLInputElement>(null);
 
   const onDrop = useCallback(
@@ -65,6 +66,7 @@ export default function DropZone() {
   }, [ingest]);
 
   return (
+    <section className="space-y-4" aria-label="加入文字">
     <div
       onDragOver={(e) => {
         e.preventDefault();
@@ -100,6 +102,29 @@ export default function DropZone() {
       <div className="mt-2 text-xs text-zinc-500">支援 .txt、.md 與程式碼檔案。也可以在頁面空白處按 Ctrl+V（Mac：⌘V）貼上文字。</div>
       <p className="mt-2 text-xs text-zinc-400">目前不支援 PDF、圖片、影音、壓縮檔或網址；請先複製其中的文字。</p>
     </div>
+    <form
+      className="space-y-2 rounded-xl border border-white/10 bg-white/5 p-4"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!draft.trim()) return;
+        void ingest({ kind: "text", text: draft });
+        setDraft("");
+      }}
+    >
+      <label htmlFor="import-text" className="block text-sm text-violet-200">或直接貼上文字</label>
+      <textarea
+        id="import-text"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        placeholder="把想整理的文字貼在這裡…"
+        className="min-h-32 w-full rounded-lg border border-white/15 bg-black/30 p-3 text-sm text-zinc-200 focus:outline-none focus:ring-2 focus:ring-violet-300"
+      />
+      <button type="submit" disabled={!draft.trim()} className="rounded-lg border border-violet-300 px-4 py-2 text-sm text-violet-200 hover:bg-violet-400/10 disabled:cursor-not-allowed disabled:opacity-40">
+        開始整理
+      </button>
+      <p className="text-xs text-zinc-400">貼上後按「開始整理」才會匯入。網址會作為文字保存，不會抓取網頁。</p>
+    </form>
+    </section>
   );
 }
 

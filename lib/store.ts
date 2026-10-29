@@ -1,5 +1,6 @@
 "use client";
 import { create } from "zustand";
+import { getDeconstructClient } from "./pipeline/deconstruct-client";
 import { contentIdOf, docFromJobResult, loadStoredDocument, saveDocument } from "./graph/corpus";
 import type { GraphDocument } from "./graph/types";
 import { canRetryIndexing, jobStatusFor } from "./pipeline/doc-state";
@@ -111,6 +112,7 @@ export const useForge = create<PipelineSlice>((set, get) => {
       try {
         const context = await runPipeline(source, {
           signal: ac.signal,
+          chunker: (text, signal) => getDeconstructClient().deconstruct(text, signal),
           onTextReady,
           getStore: getVectorStore, // 向量庫在 text commit 之後才惰性取得，文字不等它初始化
           onStage: (stageId, patch) =>
