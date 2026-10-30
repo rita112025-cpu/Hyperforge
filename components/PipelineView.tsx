@@ -6,11 +6,11 @@ import { STAGE_LABEL_ZH, type DocVectorState, type IngestJob } from "@/lib/pipel
 
 // done = 文字已就緒且語意索引完成；partial = 文字可用，但非使用者原因導致語意索引沒完成；cancelled = 使用者取消（文字若已 commit 則保留）
 const JOB_LABEL = {
-  running: "FORGING…",
-  done: "DONE（文字與語意索引完成）",
-  partial: "PARTIAL（文字可用，語意索引未完成）",
-  error: "ERROR",
-  cancelled: "CANCELLED",
+  running: "處理中…",
+  done: "完成",
+  partial: "部分完成，請查看下方說明",
+  error: "處理失敗",
+  cancelled: "已取消",
 } as const;
 
 /** 這份 job 的文字 / 語意索引狀態列。語意索引以「文件目前的狀態」為準（retry 之後會更新），沒有 docId（未 commit）時用 job 自己的結果。 */
@@ -57,7 +57,7 @@ export default function PipelineView() {
     <div className="space-y-4">
       {jobs.map((job) => (
         <div key={job.id} className="scanlines relative overflow-hidden rounded-xl border border-white/10 bg-white/5 p-4 font-mono backdrop-blur">
-          <div className="mb-3 flex items-center justify-between gap-3 text-sm">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3 text-sm">
             <span
               className={`min-w-0 truncate ${job.status === "running" ? "glitch text-neon-cyan" : "text-zinc-200"}`}
               data-text={job.name}
@@ -65,7 +65,7 @@ export default function PipelineView() {
             >
               {job.name}
             </span>
-            <span className="flex shrink-0 items-center gap-2 text-xs text-zinc-500" data-testid="job-status" data-status={job.status}>
+            <span className="flex flex-wrap items-center gap-2 text-xs text-zinc-400" data-testid="job-status" data-status={job.status}>
               {JOB_LABEL[job.status]}
               {job.status === "running" && (
                 <button
@@ -78,7 +78,9 @@ export default function PipelineView() {
               )}
             </span>
           </div>
-          <ol className="space-y-2">
+          <details className="mb-3">
+            <summary className="cursor-pointer text-xs text-zinc-400">查看處理步驟</summary>
+            <ol className="mt-3 space-y-2">
             {job.stages.map((st) => (
               <li key={st.id} className="text-xs">
                 <div className="mb-1 flex justify-between text-zinc-400">
@@ -98,7 +100,8 @@ export default function PipelineView() {
                 {st.note && <div className="mt-0.5 break-all text-[10px] text-zinc-600">{st.note}</div>}
               </li>
             ))}
-          </ol>
+            </ol>
+          </details>
           {job.error && <div className="mt-3 text-xs text-red-400">{job.error}</div>}
           <JobTextVector job={job} />
           {job.context && (
@@ -111,3 +114,4 @@ export default function PipelineView() {
     </div>
   );
 }
+

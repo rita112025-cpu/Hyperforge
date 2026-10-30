@@ -1,7 +1,8 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { dedupeDocuments } from "../lib/graph/build";
 import type { GraphDocument, GraphModel } from "../lib/graph/types";
-import { DIGEST_NOTE, basisOf, buildDigest, describeBasis } from "../lib/outputs/digest";
+import { DIGEST_NOTE, basisOf, buildDigest, describeBasis, type Digest } from "../lib/outputs/digest";
 import { copyText, downloadText } from "../lib/outputs/export";
 import { buildMindmap, mindmapToMarkdown } from "../lib/outputs/mindmap";
 import { buildNotionExport, notionToJson } from "../lib/outputs/notion";
@@ -37,21 +38,25 @@ const PREVIEW_CHARS = 4000;
 export interface OutputsPanelProps {
   docs: GraphDocument[];
   graph: GraphModel;
+  /** 工作區提供 Worker 算好的資料；獨立使用面板時可省略。 */
+  digest?: Digest | null;
+  analyzing?: boolean;
 }
 
-export default function OutputsPanel({ docs, graph }: OutputsPanelProps) {
+export default function OutputsPanel({ docs, graph, digest: preparedDigest, analyzing = false }: OutputsPanelProps) {
   const [tab, setTab] = useState<TabId>("summary");
   const [flash, setFlash] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   /** 複製失敗時的退路：顯示可全選的完整文字 */
   const [fallback, setFallback] = useState<string | null>(null);
   const fallbackRef = useRef<HTMLTextAreaElement>(null);
 
-  // 重的部分（digest = 再抽取一次）只在「面板展開、有概念」時才算；摘要 / Notion 只算「目前被選取的分頁」。
+  // 工作區的 digest 已在 Worker 算好；獨立使用面板時才同步計算。摘要 / Notion 只組裝目前分頁。
   // 資料基礎只讀圖譜統計（很便宜），所以收合或空圖譜時也能顯示。
   const [open, setOpen] = useState(true);
   const basis = useMemo(() => basisOf(graph), [graph]);
   const empty = basis.conceptsShown === 0;
-  const digest = useMemo(() => (open && !empty ? buildDigest(docs, graph) : null), [open, empty, docs, graph]);
+  const digest = useMemo(() => (open && !empty ? preparedDigest === undefined ? buildDigest(docs, graph) : preparedDigest : null), [open, empty, docs, graph, preparedDigest]);
+  const originals = useMemo(() => dedupeDocuments(docs), [docs]);
   const summary = useMemo(() => (digest && tab === "summary" ? buildSummary(digest) : null), [digest, tab]);
   const summaryMd = useMemo(() => (summary ? summaryToMarkdown(summary) : ""), [summary]);
   const notion = useMemo(() => (digest && tab === "notion" ? buildNotionExport(digest) : null), [digest, tab]);
@@ -109,7 +114,7 @@ export default function OutputsPanel({ docs, graph }: OutputsPanelProps) {
     <section aria-label="一鍵七變" className="space-y-3 rounded-xl border border-white/10 bg-white/5 p-4 font-mono" data-testid="outputs-panel">
       <div className="flex items-start justify-between gap-2">
         <div>
-          <div className="text-[10px] uppercase tracking-wider text-zinc-500">Transmutation · 一鍵七變</div>
+          <h2 className="text-sm text-violet-200">整理與匯出</h2>
           <div className="mt-1 text-[10px] text-zinc-500" data-testid="outputs-basis">
             資料基礎：{describeBasis(basis)}。{DIGEST_NOTE}。
           </div>
@@ -126,6 +131,24 @@ export default function OutputsPanel({ docs, graph }: OutputsPanelProps) {
 
       {open && (
         <>
+      {originals.length > 0 && (
+        <section aria-label="原文" className="space-y-2" data-testid="original-documents">
+          <h3 className="text-sm text-zinc-200">原文</h3>
+          <p className="text-xs text-zinc-400">沒有抽出概念也能查看與下載。以下內容保留原文，不是摘要。</p>
+          {originals.map((doc) => (
+            <details key={doc.id} open={empty && originals.length === 1} className="rounded border border-white/10 p-2">
+              <summary className="cursor-pointer break-words text-xs text-zinc-300">{doc.name}</summary>
+              <button
+                type="button"
+                className="my-2 rounded border border-white/15 px-2 py-1 text-xs text-zinc-200 hover:border-violet-300"
+                onClick={() => downloadText(`${doc.name}.txt`, doc.rawText, "text/plain")}
+                data-testid="download-original"
+              >下載原文 .txt</button>
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-zinc-300" data-testid="original-text">{doc.rawText}</pre>
+            </details>
+          ))}
+        </section>
+      )}
       <div role="tablist" aria-label="輸出種類" className="flex flex-wrap gap-1">
         {TABS.map((t) => (
           <button
@@ -152,7 +175,7 @@ export default function OutputsPanel({ docs, graph }: OutputsPanelProps) {
 
       {empty ? (
         <div className="text-xs text-zinc-500" data-testid="outputs-empty">
-          目前沒有可用的概念，所以無法產生輸出。拖入較長的文字（詞需至少出現 2 次）後，這裡會出現摘要與 Notion 資料庫。
+          {analyzing ? "正在整理概念與摘要；原文已可查看或下載。" : originals.length > 0 ? "目前沒有可用的概念，可能是文字較短或缺少重複詞，因此尚無法產生摘要。你仍可在上方查看或下載原文。" : "先加入文字，再選擇要匯出的格式。"}
         </div>
       ) : (
         <>

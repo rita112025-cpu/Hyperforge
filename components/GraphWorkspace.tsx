@@ -2,6 +2,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ALCHEMY_BADGE, MIN_ALCHEMY_PARENTS, composeModel, defaultAlchemyName, makeAlchemyNode } from "../lib/graph/alchemy";
 import { buildGraph, dedupeDocuments } from "../lib/graph/build";
+import { getGraphClient } from "../lib/graph/graph-client";
+import type { GraphAnalysis } from "../lib/graph/graph.worker";
 import { GraphController, type SelectionChange } from "../lib/graph/controller";
 import { docInfoFromDb, loadCorpus, loadVectorPresence } from "../lib/graph/corpus";
 import { EXTRACT_METHOD_NOTE, PERSON_METHOD_NOTE } from "../lib/graph/extract";
@@ -14,6 +16,8 @@ import DocumentList from "./DocumentList";
 import OutputsPanel from "./OutputsPanel";
 import GraphCanvas, { type CanvasContextMenuEvent } from "./GraphCanvas";
 import SourcePanel from "./SourcePanel";
+
+const EMPTY_GRAPH = buildGraph([]);
 
 type DbState = { state: "loading" } | { state: "ok"; count: number } | { state: "error"; message: string };
 
@@ -81,7 +85,22 @@ export default function GraphWorkspace() {
   }, []);
 
   const allDocs = useMemo(() => [...persisted, ...live], [persisted, live]);
-  const base = useMemo(() => buildGraph(allDocs), [allDocs]);
+  const [analysis, setAnalysis] = useState<(GraphAnalysis & { docs: GraphDocument[] }) | null>(null);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const currentAnalysis = analysis?.docs === allDocs ? analysis : null;
+  const base = currentAnalysis?.graph ?? analysis?.graph ?? EMPTY_GRAPH;
+  const analyzing = currentAnalysis === null;
+
+  useEffect(() => {
+    const ac = new AbortController();
+    setAnalysisError(null);
+    void getGraphClient().analyze(allDocs, ac.signal).then((result) => {
+      if (!ac.signal.aborted) setAnalysis({ ...result, docs: allDocs });
+    }).catch((e: unknown) => {
+      if (!ac.signal.aborted) setAnalysisError(e instanceof Error ? e.message : String(e));
+    });
+    return () => ac.abort();
+  }, [allDocs]);
   const model = useMemo(() => composeModel(base, temps), [base, temps]);
   const docsById = useMemo(() => new Map(dedupeDocuments(allDocs).map((d) => [d.id, d])), [allDocs]);
   const nodeById = useMemo(() => new Map(model.nodes.map((n) => [n.id, n])), [model]);
@@ -175,7 +194,11 @@ export default function GraphWorkspace() {
   };
 
   return (
-    <section className="space-y-3" aria-label="Infinite Alchemy Canvas">
+    <section className="space-y-3" aria-label="概念圖與匯出內容">
+      <h2 className="text-lg text-violet-200">概念圖</h2>
+      <p className="text-sm text-zinc-400">點選概念查看原文。連線表示兩個概念曾出現在同一句話中。</p>
+      {analyzing && !analysisError && <p role="status" className="text-sm text-zinc-400">正在整理概念與摘要，原文仍可在下方查看或下載。</p>}
+      {analysisError && <p role="alert" className="text-sm text-amber-300">概念分析失敗：{analysisError}。原文仍可在輸出面板查看或下載。</p>}
       <div className="flex flex-wrap items-center gap-2 font-mono text-xs" data-testid="graph-toolbar">
         <button
           className="rounded border border-white/15 px-2 py-1 text-zinc-200 hover:border-violet-300"
@@ -201,7 +224,9 @@ export default function GraphWorkspace() {
 
           {nothingToShow && (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-8 text-center text-xs text-zinc-500" data-testid="graph-empty">
-              {hasDocs
+              {analyzing
+                ? (analysisError ? "概念分析未完成，請保留原文或重新整理後再試。" : "正在整理概念…")
+                : hasDocs
                 ? `已載入 ${stats.docCount} 份文件，但沒有任何詞達到證據門檻（詞至少出現 2 次、文件需有足夠長度；過短文件 ${stats.skippedDocCount} 份），所以沒有概念可顯示。`
                 : "尚無內容。拖入文字檔或貼上文字後，概念會浮現在這裡。"}
             </div>
@@ -276,13 +301,21 @@ export default function GraphWorkspace() {
             selectedCount={sel.ids.length}
             parentLabels={focusNode?.parents?.map((id) => nodeById.get(id)?.label ?? id)}
           />
-          <OutputsPanel docs={allDocs} graph={base} />
+          <OutputsPanel docs={allDocs} graph={currentAnalysis?.graph ?? EMPTY_GRAPH} digest={currentAnalysis?.digest ?? null} analyzing={analyzing && !analysisError} />
         </div>
       </div>
 
       <DocumentList docs={docList} docInfo={docInfo} onRetry={(id) => void retryIndexing(id)} />
 
-      <div className="space-y-1 font-mono text-[11px] text-zinc-500" data-testid="graph-status">
+      {unsavedCount > 0 && (
+        <p role="alert" className="text-sm text-amber-300">
+          {unsavedCount} 份文件尚未儲存，重新整理後可能遺失。請保留原始文字。
+        </p>
+      )}
+      {db.state === "error" && (
+        <p role="alert" className="text-sm text-red-400">無法讀取已儲存的文件：{db.message}。目前只顯示本次加入的內容。</p>
+      )}
+      <div className="space-y-1 text-xs text-zinc-400">
         <div data-testid="graph-counts">
           文件 {stats.docCount} 份 · 概念 {stats.shownNodes} 個 · 連線 {stats.shownEdges} 條
           {temps.length > 0 && ` · ${ALCHEMY_BADGE}節點 ${model.nodes.filter((n) => n.temporary).length} 個`}
@@ -298,35 +331,41 @@ export default function GraphWorkspace() {
             顯示前 {stats.edgeCap} 條連線（共 {stats.totalEdges} 條，其餘依權重未顯示）
           </div>
         )}
-        <div data-testid="graph-source">
-          資料來源：本次匯入（記憶體）{live.length} 份 ·{" "}
-          {db.state === "loading" && "IndexedDB 載入中…"}
-          {db.state === "ok" && `IndexedDB 已載入 ${db.count} 份文字`}
-          {db.state === "error" && <span className="text-red-400">IndexedDB 讀取失敗：{db.message}（畫布只顯示本次匯入的內容）</span>}
-          {" "}· 圖譜只依賴文件文字，不依賴向量
-        </div>
-        <div data-testid="vector-status">
-          向量／語意功能：
-          {vector === null
-            ? "檢查中…"
-            : vector.state === "AVAILABLE"
-              ? `AVAILABLE（${vector.detail}）`
-              : `UNAVAILABLE（${vector.detail}）· 不影響畫布`}
-        </div>
-        <div data-testid="index-summary">
-          語意索引：已完成 {indexSummary.indexed} 份 · 建立中 {indexSummary.building} 份 · 未完成 {indexSummary.incomplete} 份
-          {indexSummary.tooLarge > 0 && ` · 過大而略過 ${indexSummary.tooLarge} 份（文字與圖譜不受影響）`}
-          {indexSummary.incomplete > 0 && "（文字都已保留；可在下方文件清單明確「重新建立索引」，不會自動重試）"}
-        </div>
-        {unsavedCount > 0 && (
-          <div className="text-amber-300" data-testid="unsaved-notice">
-            {unsavedCount} 份文件尚未儲存到 IndexedDB，重新整理後可能遺失（畫布暫時仍可顯示）
-          </div>
-        )}
-        <div>
-          中文概念：{EXTRACT_METHOD_NOTE}；人名：{PERSON_METHOD_NOTE}。連線 = 同一句話內共同出現（co-occurrence）。
-        </div>
       </div>
+      <details className="rounded-lg border border-white/10 p-3">
+        <summary className="cursor-pointer text-sm text-zinc-400">查看儲存、語意索引與分析方式</summary>
+        <div className="mt-3 space-y-1 font-mono text-[11px] text-zinc-500" data-testid="graph-status">
+          <div data-testid="graph-source">
+            資料來源：本次匯入（記憶體）{live.length} 份 ·{" "}
+            {db.state === "loading" && "IndexedDB 載入中…"}
+            {db.state === "ok" && `IndexedDB 已載入 ${db.count} 份文字`}
+            {db.state === "error" && <span className="text-red-400">IndexedDB 讀取失敗：{db.message}（畫布只顯示本次匯入的內容）</span>}
+            {" "}· 圖譜只依賴文件文字，不依賴向量
+          </div>
+          <div data-testid="vector-status">
+            向量／語意功能：
+            {vector === null
+              ? "檢查中…"
+              : vector.state === "AVAILABLE"
+                ? `AVAILABLE（${vector.detail}）`
+                : `UNAVAILABLE（${vector.detail}）· 不影響畫布`}
+          </div>
+          <div data-testid="index-summary">
+            語意索引：已完成 {indexSummary.indexed} 份 · 建立中 {indexSummary.building} 份 · 未完成 {indexSummary.incomplete} 份
+            {indexSummary.tooLarge > 0 && ` · 過大而略過 ${indexSummary.tooLarge} 份（文字與圖譜不受影響）`}
+            {indexSummary.incomplete > 0 && "（文字都已保留；可在下方文件清單明確「重新建立索引」，不會自動重試）"}
+          </div>
+          {unsavedCount > 0 && (
+            <div className="text-amber-300" data-testid="unsaved-notice">
+              {unsavedCount} 份文件尚未儲存到 IndexedDB，重新整理後可能遺失（畫布暫時仍可顯示）
+            </div>
+          )}
+          <div>
+            中文概念：{EXTRACT_METHOD_NOTE}；人名：{PERSON_METHOD_NOTE}。連線 = 同一句話內共同出現（co-occurrence）。
+          </div>
+        </div>
+
+      </details>
 
       {/* 無障礙：Canvas 內容的文字替代（React 文字節點） */}
       <ul className="sr-only" aria-label="圖譜節點清單">
@@ -337,3 +376,4 @@ export default function GraphWorkspace() {
     </section>
   );
 }
+

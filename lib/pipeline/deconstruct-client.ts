@@ -158,7 +158,15 @@ export class DeconstructClient {
       }
       this.pump();
     };
-    worker.postMessage({ id: job.id, rawText: job.rawText });
+    try {
+      worker.postMessage({ id: job.id, rawText: job.rawText });
+    } catch (e) {
+      this.current = null;
+      this.killWorker();
+      job.cleanup();
+      job.reject(e instanceof Error ? e : new Error(String(e)));
+      this.pump();
+    }
   }
 }
 

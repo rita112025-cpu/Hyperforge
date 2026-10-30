@@ -1,5 +1,4 @@
-import { buildGraph } from "./build";
-import type { GraphRequest, GraphResponse } from "./graph.worker";
+import { handleGraphRequest, type GraphAnalysis, type GraphRequest, type GraphResponse } from "./graph.worker";
 import type { GraphDocument, GraphModel } from "./types";
 
 export interface GraphWorkerLike {
@@ -23,7 +22,8 @@ function defaultSpawn(): GraphWorkerLike {
 interface Job {
   id: number;
   docs: GraphDocument[];
-  resolve: (g: GraphModel) => void;
+  includeDigest: boolean;
+  resolve: (g: GraphAnalysis) => void;
   reject: (e: Error) => void;
   cleanup: () => void;
 }
@@ -43,14 +43,29 @@ export class GraphClient {
   constructor(private deps: GraphClientDeps = {}) {}
 
   build(docs: GraphDocument[], signal?: AbortSignal): Promise<GraphModel> {
+    return this.request(docs, false, signal).then((result) => result.graph);
+  }
+
+  analyze(docs: GraphDocument[], signal?: AbortSignal): Promise<GraphAnalysis> {
+    return this.request(docs, true, signal);
+  }
+
+  private runSync(docs: GraphDocument[], includeDigest: boolean): GraphAnalysis {
+    const res = handleGraphRequest({ id: 0, docs, includeDigest });
+    if (!res.ok) throw new Error(res.error);
+    return { graph: res.graph, digest: res.digest ?? null };
+  }
+
+  private request(docs: GraphDocument[], includeDigest: boolean, signal?: AbortSignal): Promise<GraphAnalysis> {
     if (signal?.aborted) return Promise.reject(abortError());
     const supported = this.deps.supported ?? (() => typeof Worker !== "undefined");
-    if (!supported()) return Promise.resolve(buildGraph(docs));
-    return new Promise<GraphModel>((resolve, reject) => {
+    if (!supported()) return Promise.resolve().then(() => this.runSync(docs, includeDigest));
+    return new Promise<GraphAnalysis>((resolve, reject) => {
       const onAbort = () => this.abortJob(job);
       const job: Job = {
         id: nextId++,
         docs,
+        includeDigest,
         resolve,
         reject,
         cleanup: () => signal?.removeEventListener("abort", onAbort),
@@ -106,7 +121,7 @@ export class GraphClient {
       // Worker 建立失敗（例如 CSP）：退回同步建圖
       job.cleanup();
       try {
-        job.resolve(buildGraph(job.docs));
+        job.resolve(this.runSync(job.docs, job.includeDigest));
       } catch (e) {
         job.reject(e instanceof Error ? e : new Error(String(e)));
       }
@@ -121,7 +136,7 @@ export class GraphClient {
       const done = this.current;
       this.current = null;
       done.cleanup();
-      if (res.ok) done.resolve(res.graph);
+      if (res.ok) done.resolve({ graph: res.graph, digest: res.digest ?? null });
       else done.reject(new Error(res.error));
       this.pump();
     };
@@ -135,7 +150,15 @@ export class GraphClient {
       }
       this.pump();
     };
-    worker.postMessage({ id: job.id, docs: job.docs });
+    try {
+      worker.postMessage({ id: job.id, docs: job.docs, includeDigest: job.includeDigest });
+    } catch (e) {
+      this.current = null;
+      this.killWorker();
+      job.cleanup();
+      job.reject(e instanceof Error ? e : new Error(String(e)));
+      this.pump();
+    }
   }
 }
 
