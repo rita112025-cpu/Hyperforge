@@ -3,7 +3,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ALCHEMY_BADGE, MIN_ALCHEMY_PARENTS, composeModel, defaultAlchemyName, makeAlchemyNode } from "../lib/graph/alchemy";
 import { buildGraph, dedupeDocuments } from "../lib/graph/build";
 import { getGraphClient } from "../lib/graph/graph-client";
-import type { GraphAnalysis } from "../lib/graph/graph.worker";
+import type { GraphAnalysis } from "../lib/graph/graph-protocol";
 import { GraphController, type SelectionChange } from "../lib/graph/controller";
 import { docInfoFromDb, loadCorpus, loadVectorPresence } from "../lib/graph/corpus";
 import { EXTRACT_METHOD_NOTE, PERSON_METHOD_NOTE } from "../lib/graph/extract";
@@ -94,7 +94,7 @@ export default function GraphWorkspace() {
   useEffect(() => {
     const ac = new AbortController();
     setAnalysisError(null);
-    void getGraphClient().analyze(allDocs, ac.signal).then((result) => {
+    void getGraphClient().analyze(allDocs, { signal: ac.signal }).then((result) => {
       if (!ac.signal.aborted) setAnalysis({ ...result, docs: allDocs });
     }).catch((e: unknown) => {
       if (!ac.signal.aborted) setAnalysisError(e instanceof Error ? e.message : String(e));

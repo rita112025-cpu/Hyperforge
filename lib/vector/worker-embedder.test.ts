@@ -276,3 +276,22 @@ describe("與 handleMessage 串接（同一份協定，不經過真的 Worker）
     await expect(bad.embed(["a"])).rejects.toThrow("推論失敗");
   });
 });
+
+describe("WorkerEmbedder.abortAll", () => {
+  it("取消進行中與排隊中的請求、終止 Worker，之後仍可使用", async () => {
+    const { e, workers } = harness();
+    const a = e.embed(["a"]);
+    const b = e.embed(["b"]);
+    expect(e.running).toBe(true);
+    expect(e.queued).toBe(2);
+    e.abortAll();
+    await expect(a).rejects.toMatchObject({ name: "AbortError" });
+    await expect(b).rejects.toMatchObject({ name: "AbortError" });
+    expect(workers[0].terminated).toBe(true);
+    expect(e.running).toBe(false);
+    const c = e.embed(["c"]);
+    expect(workers).toHaveLength(2);
+    workers[1].ok(workers[1].requests[0]);
+    expect(await c).toHaveLength(1);
+  });
+});

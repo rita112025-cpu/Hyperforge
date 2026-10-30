@@ -4,7 +4,7 @@ import { chunkText } from "../pipeline/chunker";
 import { HyperforgeDB } from "./db";
 import { FakeEmbedder } from "./fake-embedder.test-util";
 import { HNSW } from "./hnsw";
-import { clearIndex, loadIndex } from "./hnsw-persist";
+import { clearIndex, loadHNSWIndex as loadIndex, readHNSWIndexInfo, saveHNSWIndex } from "./hnsw-persist";
 import { VectorStore } from "./index-store";
 
 let n = 0;
@@ -67,5 +67,19 @@ describe("HNSW 持久化", () => {
     expect(await loadIndex(db, { model: "other", dim: e.dim })).toBeNull();
     await clearIndex(db);
     expect(await loadIndex(db, { model: e.id, dim: e.dim })).toBeNull();
+  });
+
+  it("readHNSWIndexInfo 回報 model / dim / size / savedAt；saveHNSWIndex 回傳寫入時間", async () => {
+    const db = open(`p${Date.now()}-${n++}`);
+    const e = new FakeEmbedder();
+    expect(await readHNSWIndexInfo(db)).toBeNull();
+    const s = new VectorStore(db, e);
+    await s.init();
+    await s.ingest(input(text(600)), () => undefined);
+    const info = await readHNSWIndexInfo(db);
+    expect(info).toMatchObject({ model: e.id, dim: e.dim, size: s.indexSize });
+    const index = await loadIndex(db, { model: e.id, dim: e.dim });
+    const savedAt = await saveHNSWIndex(db, index!, { model: e.id, dim: e.dim });
+    expect(savedAt).toBeGreaterThanOrEqual(info!.savedAt);
   });
 });

@@ -21,9 +21,9 @@ import SegmentLine from "./SegmentLine";
  * （本檔不得使用 innerHTML / dangerouslySetInnerHTML，也不引入 markdown→HTML 套件）。
  * 資料基礎：與畫布同一份 docs 與 graph（同一次 render 傳入、useMemo 以它們為 key），所以不會顯示過期內容。
  */
-type TabId = "summary" | "mindmap" | "threads" | "slides" | "notion" | "socratic" | "quotecard";
+export type OutputsTabId = "summary" | "mindmap" | "threads" | "slides" | "notion" | "socratic" | "quotecard";
 
-const TABS: Array<{ id: TabId; label: string; ready: boolean; stage?: string }> = [
+const TABS: Array<{ id: OutputsTabId; label: string; ready: boolean; stage?: string }> = [
   { id: "summary", label: "核心摘要", ready: true },
   { id: "mindmap", label: "心智圖", ready: true },
   { id: "threads", label: "Threads", ready: true },
@@ -38,13 +38,17 @@ const PREVIEW_CHARS = 4000;
 export interface OutputsPanelProps {
   docs: GraphDocument[];
   graph: GraphModel;
+  tabs?: readonly OutputsTabId[];
+  defaultTab?: OutputsTabId;
   /** 工作區提供 Worker 算好的資料；獨立使用面板時可省略。 */
   digest?: Digest | null;
   analyzing?: boolean;
 }
 
-export default function OutputsPanel({ docs, graph, digest: preparedDigest, analyzing = false }: OutputsPanelProps) {
-  const [tab, setTab] = useState<TabId>("summary");
+export default function OutputsPanel({ docs, graph, tabs, defaultTab, digest: preparedDigest, analyzing = false }: OutputsPanelProps) {
+  const availableTabs = useMemo(() => TABS.filter((candidate) => !tabs || tabs.includes(candidate.id)), [tabs]);
+  const firstTab = defaultTab && availableTabs.some((candidate) => candidate.id === defaultTab) ? defaultTab : (availableTabs[0]?.id ?? "summary");
+  const [tab, setTab] = useState<OutputsTabId>(firstTab);
   const [flash, setFlash] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   /** 複製失敗時的退路：顯示可全選的完整文字 */
   const [fallback, setFallback] = useState<string | null>(null);
@@ -71,7 +75,11 @@ export default function OutputsPanel({ docs, graph, digest: preparedDigest, anal
   const [layout, setLayout] = useState<ThreadsLayout>("professional");
   const threads = useMemo(() => (digest && tab === "threads" ? buildThreads(digest, layout) : null), [digest, tab, layout]);
   const threadsText = useMemo(() => (threads ? threadsToText(threads) : ""), [threads]);
-  const current = TABS.find((t) => t.id === tab)!;
+  const current = availableTabs.find((t) => t.id === tab) ?? availableTabs[0];
+
+  useEffect(() => {
+    if (!availableTabs.some((candidate) => candidate.id === tab)) setTab(firstTab);
+  }, [availableTabs, firstTab, tab]);
   // 複製與下載：Markdown 輸出（摘要、簡報）是跳脫後的 Markdown；Notion 是 JSON；Threads 是「純文字」（貼到 Threads，不跳脫）
   const text = tab === "summary" ? summaryMd : tab === "notion" ? notionJson : tab === "slides" ? slidesMd : tab === "threads" ? threadsText : tab === "mindmap" ? mindmapMd : tab === "socratic" ? socraticMd : "";
   const fileInfo: { name: string; mime: string; ext: string } | null =
@@ -150,7 +158,7 @@ export default function OutputsPanel({ docs, graph, digest: preparedDigest, anal
         </section>
       )}
       <div role="tablist" aria-label="輸出種類" className="flex flex-wrap gap-1">
-        {TABS.map((t) => (
+        {availableTabs.map((t) => (
           <button
             key={t.id}
             role="tab"
@@ -287,7 +295,7 @@ export default function OutputsPanel({ docs, graph, digest: preparedDigest, anal
             </div>
           )}
 
-          {!current.ready && <div className="text-xs text-zinc-500">尚未實作（{current.stage}）。</div>}
+          {current && !current.ready && <div className="text-xs text-zinc-500">尚未實作（{current.stage}）。</div>}
         </>
       )}
         </>
