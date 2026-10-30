@@ -1,5 +1,7 @@
+import type { Digest } from "../outputs/digest";
 import {
   createGraphHost,
+  type GraphAnalysis,
   type GraphHost,
   type GraphRequest,
   type GraphResponse,
@@ -34,6 +36,7 @@ export interface GraphBuildOptions {
 
 export interface GraphBuildResult {
   graph: GraphModel;
+  digest: Digest | null;
   /** 只有 buildFromText 會有：Worker 切好 chunk 的文件 */
   doc?: GraphDocument;
   durationMs: number;
@@ -54,7 +57,7 @@ export interface GraphClientStats {
   lastDurationMs: number | null;
 }
 
-type BuildPayload = { type: "build"; docs: GraphDocument[] } | { type: "build-text"; name: string; rawText: string };
+type BuildPayload = { type: "build"; docs: GraphDocument[]; includeDigest: boolean } | { type: "build-text"; name: string; rawText: string };
 
 interface Job {
   id: number;
@@ -112,7 +115,12 @@ export class GraphClient {
   constructor(private deps: GraphClientDeps = {}) {}
 
   build(docs: GraphDocument[], opts: GraphBuildOptions = {}): Promise<GraphModel> {
-    return this.enqueue({ type: "build", docs }, opts).then((r) => r.graph);
+    return this.enqueue({ type: "build", docs, includeDigest: false }, opts).then((r) => r.graph);
+  }
+
+  /** 建圖並在同一次 Worker 運算內抽出摘要（沒有概念時 digest 為 null）。 */
+  analyze(docs: GraphDocument[], opts: GraphBuildOptions = {}): Promise<GraphAnalysis> {
+    return this.enqueue({ type: "build", docs, includeDigest: true }, opts).then((r) => ({ graph: r.graph, digest: r.digest }));
   }
 
   /** 原文直接送進 Worker（chunk 切分也不佔主執行緒）。 */
@@ -250,9 +258,15 @@ export class GraphClient {
     if (!job) return;
     this.current = job;
     const req: GraphRequest = job.payload.type === "build"
-      ? { type: "build", id: job.id, docs: job.payload.docs }
+      ? { type: "build", id: job.id, docs: job.payload.docs, includeDigest: job.payload.includeDigest }
       : { type: "build-text", id: job.id, name: job.payload.name, rawText: job.payload.rawText };
-    this.ensureWorker().postMessage(req);
+    try {
+      this.ensureWorker().postMessage(req);
+    } catch (e) {
+      // 傳送失敗（例如無法複製訊息）：這個請求結束，丟棄 Worker，佇列中的下一份仍會繼續
+      this.settle(job, e instanceof Error ? e : new Error(String(e)));
+      this.finishCurrent(true);
+    }
   }
 
   private onMessage(res: GraphResponse): void {
@@ -264,7 +278,7 @@ export class GraphClient {
         if (!job.settled) job.onProgress?.({ stage: res.stage, progress: res.progress });
         return;
       case "graph":
-        this.settle(job, { graph: res.graph, doc: res.doc, durationMs: res.durationMs, stageMs: res.stageMs });
+        this.settle(job, { graph: res.graph, digest: res.digest, doc: res.doc, durationMs: res.durationMs, stageMs: res.stageMs });
         return;
       case "error":
         this.settle(job, res.aborted ? abortError() : new Error(res.error));

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildGraph } from "./build";
+import { buildDigest } from "../outputs/digest";
 import { GraphClient, type GraphWorkerLike } from "./graph-client";
 import { createGraphHost, type GraphRequest, type GraphResponse } from "./graph-protocol";
 import type { GraphDocument } from "./types";
@@ -157,3 +158,37 @@ describe("createGraphHost", () => {
     expect(out).toEqual([{ type: "error", id: 3, error: "無效的 graph 請求", aborted: false }, { type: "done", id: 3 }]);
   });
 });
+
+describe("GraphClient analysis", () => {
+  it("從同一次 Worker 運算取得一致的圖譜與摘要", async () => {
+    const w = fakeWorker(false);
+    const c = new GraphClient({ spawn: () => w, supported: () => true });
+    const p = c.analyze(docs);
+    expect(w.sent[0]).toMatchObject({ type: "build", includeDigest: true });
+    w.flush();
+    const graph = buildGraph(docs);
+    expect(await p).toEqual({ graph, digest: buildDigest(docs, graph) });
+  });
+
+  it("沒有概念時不抽摘要，但保留文件統計", async () => {
+    const short = [doc("short", "今天開會。")];
+    const result = await new GraphClient({ supported: () => false }).analyze(short);
+    expect(result.graph.nodes).toHaveLength(0);
+    expect(result.digest).toBeNull();
+    expect(result.graph.stats.docCount).toBe(1);
+  });
+
+  it("傳送失敗後清除進行中工作，下一份仍能完成", async () => {
+    const broken = fakeWorker(false);
+    broken.postMessage = () => { throw new DOMException("clone failed", "DataCloneError"); };
+    const healthy = fakeWorker(false);
+    let spawned = 0;
+    const c = new GraphClient({ spawn: () => (spawned++ === 0 ? broken : healthy), supported: () => true });
+    await expect(c.build(docs)).rejects.toThrow("clone failed");
+    expect(broken.terminated).toBe(true);
+    const next = c.build(docs);
+    healthy.flush();
+    expect(await next).toEqual(buildGraph(docs));
+  });
+});
+

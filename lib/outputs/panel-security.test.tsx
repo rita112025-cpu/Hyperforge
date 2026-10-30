@@ -54,3 +54,23 @@ describe("OutputsPanel 對 hostile 內容：全部顯示為純文字", () => {
     expect(html).toMatch(/基於 2 份文件/);
   });
 });
+
+describe("沒有概念時仍能取得原文", () => {
+  it("短文可查看與下載，且不會偽造摘要", () => {
+    const short = [doc("short.txt", "今天開會。")];
+    const graph = buildGraph(short);
+    expect(graph.nodes).toHaveLength(0);
+    const html = renderToStaticMarkup(<OutputsPanel docs={short} graph={graph} digest={null} />);
+    expect(html).toContain("original-text");
+    expect(html).toContain("今天開會。");
+    expect(html).toContain("download-original");
+    expect(html).not.toContain("summary-lines");
+  });
+
+  it("短文與檔名中的 HTML 仍是純文字", () => {
+    const short = [doc("<script>file</script>", "<img src=x onerror=alert(1)>")];
+    const html = renderToStaticMarkup(<OutputsPanel docs={short} graph={buildGraph([])} digest={null} />);
+    expect(html).toContain("&lt;img");
+    expect(html).not.toMatch(/<(script|img)\b/i);
+  });
+});

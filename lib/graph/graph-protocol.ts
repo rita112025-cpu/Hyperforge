@@ -1,4 +1,5 @@
 import { chunkText } from "../pipeline/chunker";
+import { buildDigest, type Digest } from "../outputs/digest";
 import { assembleGraph, extractFromDocuments, prepareDocuments } from "./build";
 import { contentIdOf, docFromJobResult } from "./corpus";
 import type { GraphDocument, GraphModel } from "./types";
@@ -10,16 +11,22 @@ import type { GraphDocument, GraphModel } from "./types";
 export type GraphStage = "chunk" | "extract" | "build";
 
 export type GraphRequest =
-  | { type: "build"; id: number; docs: GraphDocument[] }
+  | { type: "build"; id: number; docs: GraphDocument[]; includeDigest?: boolean }
   /** 原文直接送進 Worker：chunk 切分也在 Worker 內完成 */
   | { type: "build-text"; id: number; name: string; rawText: string }
   | { type: "abort"; id: number };
 
 export type GraphStageTimings = Record<GraphStage, number>;
 
+/** 工作區需要的分析結果：圖譜，以及（可選）在 Worker 內算好的摘要。 */
+export interface GraphAnalysis {
+  graph: GraphModel;
+  digest: Digest | null;
+}
+
 export type GraphResponse =
   | { type: "progress"; id: number; stage: GraphStage; progress: number }
-  | { type: "graph"; id: number; graph: GraphModel; doc?: GraphDocument; durationMs: number; stageMs: GraphStageTimings }
+  | { type: "graph"; id: number; graph: GraphModel; digest: Digest | null; doc?: GraphDocument; durationMs: number; stageMs: GraphStageTimings }
   | { type: "error"; id: number; error: string; aborted: boolean }
   | { type: "done"; id: number };
 
@@ -98,7 +105,8 @@ export function createGraphHost(post: (m: GraphResponse) => void, deps: GraphHos
       progress("build", 1);
       await checkpoint(signal);
 
-      post({ type: "graph", id: req.id, graph, doc, durationMs: now() - t0, stageMs });
+      const digest = req.type === "build" && req.includeDigest && graph.nodes.length > 0 ? buildDigest(prepared, graph) : null;
+      post({ type: "graph", id: req.id, graph, digest, doc, durationMs: now() - t0, stageMs });
     } catch (e) {
       post({ type: "error", id: req.id, error: e instanceof Error ? e.message : String(e), aborted: isAbort(e) });
     }
